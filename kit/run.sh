@@ -69,11 +69,14 @@ plan() {
   S 1-09-membw-all-cores-mem-on-node0 step_membw_multi all-cores-mem-on-node0 --phys --policy bind:0
 
   phase 2 "kernel checks" 5
-  S 2-00-kernel-selftest step_kernel_selftest
+  S 2-00-kernel-selftest step_kernel_selftest test-ssse3-kernels
   S 2-00b-tiled-selftest step_tiled_selftest
-  S 2-00c-kernel-bench step_kernel_bench
+  S 2-00c-kernel-bench step_kernel_bench test-ssse3-kernels
   S 2-00d-repack-selftest step_repack_selftest
   S 2-00e-lut-bench step_lut_bench
+  # Flash-Next formats (q6_K, q5_K, iq4_nl, q2_0); q6_K/q5_K also run in phase 4's Qwen3.8-27B
+  S 2-00f-flashnext-kernel-selftest step_kernel_selftest test-fn-kernels
+  S 2-00g-flashnext-kernel-bench step_kernel_bench test-fn-kernels
   S 2-01-tiny-q4_0-stage step_stage "$TINY_Q40"
   S 2-02-tiny-q4_0-sanity step_sanity "$TINY_Q40"
   S 2-03-tiny-q4_0-bench step_bench "$TINY_Q40" all-sockets cores 128 32 3
@@ -461,20 +464,21 @@ step_sysinfo() {
   return 0
 }
 
-# The perseus SSSE3 kernels against llama.cpp's generic reference, on this CPU.
-step_kernel_selftest() {
+# Perseus SSSE3 kernels (kernels/test_*.c) against llama.cpp's generic reference, on this CPU.
+step_kernel_selftest() { # test binary
   need_linux_llama
-  local t="$BIN/stock/$VARIANT/test-ssse3-kernels"
-  [ -x "$t" ] || skip "kernel self-test not in this kit"
+  local t="$BIN/stock/$VARIANT/$1"
+  [ -x "$t" ] || skip "$1 not in this kit"
   run_cmd 300 "$t" 100
 }
 
 # Per-format kernel cost on this CPU (1 thread, weights in L2): which formats are compute-bound
-# here, and what the multi-column kernels save per extra token.
-step_kernel_bench() {
+# here, and what the multi-column kernels save per extra token. kernels/gap.py reads every
+# *-kernel-bench step.
+step_kernel_bench() { # test binary
   need_linux_llama
-  local t="$BIN/stock/$VARIANT/test-ssse3-kernels"
-  [ -x "$t" ] || skip "kernel self-test not in this kit"
+  local t="$BIN/stock/$VARIANT/$1"
+  [ -x "$t" ] || skip "$1 not in this kit"
   note_env
   run_cmd 300 "$t" bench
 }

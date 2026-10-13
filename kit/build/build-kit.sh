@@ -76,8 +76,9 @@ cmd_binaries() {
   mkdir -p "$WORK/bin" "$WORK/build"
   # perseus patches for pre-AVX CPUs (kernels/), applied to a clean copy of the files they touch
   local stock="$WORK/src/llama.cpp-stock"
-  git -C "$stock" checkout -- ggml/src/ggml-cpu/arch/x86/quants.c ggml/src/ggml-cpu/quants.h ggml/src/ggml-cpu/ggml-cpu.c ggml/src/ggml-cpu/repack.cpp ggml/src/ggml-cpu/tiled
+  git -C "$stock" checkout -- ggml/src/ggml-cpu/arch/x86/quants.c ggml/src/ggml-cpu/arch-fallback.h ggml/src/ggml-cpu/quants.h ggml/src/ggml-cpu/ggml-cpu.c ggml/src/ggml-cpu/repack.cpp ggml/src/ggml-cpu/tiled
   python3 -I "$KERNELS/apply_ssse3.py" "$stock" || die "could not apply the SSSE3 kernels"
+  python3 -I "$KERNELS/apply_ssse3_fn.py" "$stock" || die "could not apply the Flash-Next SSSE3 kernels"
   python3 -I "$KERNELS/apply_tiled_sse.py" "$stock" || die "could not enable the tiled matmul on SSE4.1"
   log "membw (static, baseline x86-64)"
   in_docker "mkdir -p /work/bin/tools && gcc -O2 -Wall -Wextra -Werror -static -pthread -march=x86-64 -mtune=generic -o /work/bin/tools/membw /kit/src/membw.c"
@@ -101,6 +102,7 @@ cmd_binaries() {
   "$KERNELS/build-test.sh" $VARIANTS
   for v in $VARIANTS; do
     cp "$WORK/test/test_ssse3_kernels-$v" "$WORK/bin/stock/$v/test-ssse3-kernels"
+    cp "$WORK/test/test-fn-kernels-$v" "$WORK/bin/stock/$v/test-fn-kernels"
     cp "$WORK/test/test-tiled-mulmat-$v" "$WORK/bin/stock/$v/test-tiled-mulmat"
     cp "$WORK/test/test-lut-$v" "$WORK/bin/stock/$v/test-lut"
     if [ "$v" != haswell ]; then cp "$WORK/test/test-repack-mulmat-$v" "$WORK/bin/stock/$v/test-repack-mulmat"; fi
@@ -143,6 +145,8 @@ cmd_test() {
   check "membw read on Penryn" 0 "$(qemu_exit Penryn /work/bin/tools/membw read --threads 2 --mb 64 --secs 0.2 --reps 1)"
   check "SSSE3 kernels match reference on Penryn"  0 "$(qemu_exit Penryn /work/bin/stock/penryn/test-ssse3-kernels 20)"
   check "SSSE3 kernels match reference on Nehalem" 0 "$(qemu_exit Nehalem /work/bin/stock/nehalem/test-ssse3-kernels 20)"
+  check "Flash-Next kernels match reference on Penryn"  0 "$(qemu_exit Penryn /work/bin/stock/penryn/test-fn-kernels 20)"
+  check "Flash-Next kernels match reference on Nehalem" 0 "$(qemu_exit Nehalem /work/bin/stock/nehalem/test-fn-kernels 20)"
   check "tiled matmul matches reference on Penryn"  0 "$(qemu_exit Penryn /work/bin/stock/penryn/test-tiled-mulmat)"
   check "tiled matmul matches reference on Nehalem" 0 "$(qemu_exit Nehalem /work/bin/stock/nehalem/test-tiled-mulmat)"
   check "IQ3_S repack matches reference on Penryn"  0 "$(qemu_exit Penryn /work/bin/stock/penryn/test-repack-mulmat)"
@@ -213,8 +217,9 @@ cmd_assemble() {
     printf '{\n  "built_at": "%s",\n  "tier": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tier"
     printf '  "stock_commit": "%s",\n' "$(git -C "$WORK/src/llama.cpp-stock" rev-parse HEAD)"
     printf '  "prism_commit": "%s",\n' "$(git -C "$WORK/src/llama.cpp-prism" rev-parse HEAD)"
-    printf '  "stock_patch": "kernels/apply_ssse3.py sha256 %s, kernels/apply_tiled_sse.py sha256 %s",\n' \
-      "$(sha256sum "$KERNELS/apply_ssse3.py" | cut -d' ' -f1)" "$(sha256sum "$KERNELS/apply_tiled_sse.py" | cut -d' ' -f1)"
+    printf '  "stock_patch": "kernels/apply_ssse3.py sha256 %s, kernels/apply_ssse3_fn.py sha256 %s, kernels/apply_tiled_sse.py sha256 %s",\n' \
+      "$(sha256sum "$KERNELS/apply_ssse3.py" | cut -d' ' -f1)" "$(sha256sum "$KERNELS/apply_ssse3_fn.py" | cut -d' ' -f1)" \
+      "$(sha256sum "$KERNELS/apply_tiled_sse.py" | cut -d' ' -f1)"
     local dirty=""; [ -n "$(git -C "$KIT" status --porcelain -- . 2>/dev/null)" ] && dirty="-dirty"
     printf '  "kit_commit": "%s%s",\n' "$(git -C "$KIT" rev-parse --short HEAD 2>/dev/null || echo none)" "$dirty"
     printf '  "variants": "%s"\n}\n' "$VARIANTS"

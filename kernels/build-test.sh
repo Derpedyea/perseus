@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Builds the self-tests against the stock llama.cpp build of each CPU variant (rebuilding that
 # variant's ggml libraries first), inside the kit's build image:
-#   test_ssse3_kernels.c, llama.cpp's tests/test-tiled-mulmat.cpp, lut_bench.c (standalone) and,
-#   for the pre-AVX variants (the only ones with the IQ3_S repack), test_repack_mulmat.c.
+#   test_ssse3_kernels.c, test_fn_kernels.c, llama.cpp's tests/test-tiled-mulmat.cpp,
+#   lut_bench.c (standalone) and, for the pre-AVX variants (the only ones with the IQ3_S repack),
+#   test_repack_mulmat.c.
 #   kernels/build-test.sh [variant...]     default: penryn nehalem haswell
 # Output: $WORK/test/<test>-<variant>
 set -euo pipefail
@@ -22,6 +23,10 @@ for v in $VARIANTS; do
         -I\$S/ggml/include -I\$S/ggml/src -I\$S/ggml/src/ggml-cpu \
         /kernels/test_ssse3_kernels.c \$B/libggml.a \$B/libggml-cpu.a \$B/libggml-base.a -lstdc++ -lm \
         -o /work/test/test_ssse3_kernels-$v
+      gcc -O2 $march -mtune=generic -Wall -Wextra -static -pthread \
+        -I\$S/ggml/include -I\$S/ggml/src -I\$S/ggml/src/ggml-cpu \
+        /kernels/test_fn_kernels.c \$B/libggml.a \$B/libggml-cpu.a \$B/libggml-base.a -lstdc++ -lm \
+        -o /work/test/test-fn-kernels-$v
       g++ -O2 $march -mtune=generic -static -pthread -I\$S/ggml/include \$S/tests/test-tiled-mulmat.cpp \
         \$B/libggml.a \$B/libggml-cpu.a \$B/libggml-base.a -lm -o /work/test/test-tiled-mulmat-$v
       gcc -O2 $march -mtune=generic -Wall -Wextra -static -o /work/test/test-lut-$v /kernels/lut_bench.c

@@ -2,8 +2,8 @@
 """Where does decode time go? Compares a lab run's measured decode speed with its two ceilings.
 
   bandwidth ceiling = memory bandwidth (membw step) / bytes of weights read per token
-  compute ceiling   = sum over quant formats of (weights / 256) * ns per 256 weights (kernel bench,
-                      step 2-00c, one thread) / cores used
+  compute ceiling   = sum over quant formats of (weights / 256) * ns per 256 weights (kernel
+                      benches, steps 2-00c and 2-00g, one thread) / cores used
 
 Whichever ceiling is lower is the bottleneck; the gap between it and the measured speed is
 overhead (other ops, sync, compute and memory not overlapping). The compute ceiling assumes the
@@ -28,7 +28,8 @@ def main():
     run, model, step = sys.argv[1:4]
     label = sys.argv[4] if len(sys.argv) > 4 else None
 
-    # ns per 256 weights, one column, from the kernel bench: "bench iq2_xxs_q8_K nc=1 single 12.9 ..."
+    # ns per 256 weights, one column, from the kernel benches: "bench iq2_xxs_q8_K nc=1 single 12.9 ..."
+    # (their "generic" rows, llama.cpp's scalar code, are not what the build runs)
     # a "repacked" row (the load-time layout llama.cpp then runs, see repack.cpp) replaces the
     # format's "single" row, and its bigger blocks count in the bytes read per token
     ns, repacked = {}, set()
@@ -40,7 +41,7 @@ def main():
                 if m.group(2) == "repacked":
                     repacked.add(m.group(1).lower())
     if not ns:
-        sys.exit("no kernel bench (step 2-00c) in this run")
+        sys.exit("no kernel bench (steps 2-00c, 2-00g) in this run")
 
     # bandwidth: the named membw label, else the best all-core result
     gbps = {}
