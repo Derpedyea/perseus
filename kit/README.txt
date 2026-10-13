@@ -51,3 +51,5 @@ the same way (sudo bash run.sh). The model tests show as 'absent'.
 It needs well under 1 GB, so any USB stick works, FAT32 included (the format
 most small sticks ship with). If the same stick later gets the models, just
 run the same command again; the model tests run then.
+From the zip (PERSEUS-KIT-diag.zip): extract it to the top of the drive with
+any unzip tool, then: cd "/media/$USER/<drive>/PERSEUS-KIT" && sudo bash run.sh

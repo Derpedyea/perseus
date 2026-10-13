@@ -7,6 +7,7 @@
 #   build-kit.sh test                run the binaries under QEMU as Penryn/Nehalem CPUs, incl. negative controls
 #   build-kit.sh models [TIER]       download + sha256-verify models up to TIER (diag|core|standard), resumable
 #   build-kit.sh assemble DEST [TIER]  write DEST/PERSEUS-KIT (scripts, binaries, models, MANIFEST.json)
+#   build-kit.sh zip OUT.zip         the diag kit (assemble ... diag) as one zip: PERSEUS-KIT/ at the top
 # Tiers: diag = no models (machine facts, memory bandwidth, kernel checks; FAT32 is fine),
 #        core = + the compact 27Bs (22.1 GB of models), standard = + Qwen3.8-27B Q4_0 and its MTP head (39.5 GB).
 set -euo pipefail
@@ -239,11 +240,27 @@ cmd_assemble() {
   log "done. Safely eject the USB before unplugging."
 }
 
+# Nothing in the kit relies on exec bits or symlinks (run.sh runs under 'bash' and copies bin/ to
+# the local disk before chmod-ing it), so any unzip tool onto any filesystem works.
+cmd_zip() {
+  local zip="${1:-}"
+  [ -n "$zip" ] || die "usage: $0 zip OUT.zip"
+  [ ! -e "$zip" ] || die "$zip exists; remove it first"
+  zip="$(cd "$(dirname "$zip")" && pwd)/$(basename "$zip")"
+  ZIP_TMP=$(mktemp -d "$WORK/zip.XXXX")  # global: the EXIT trap runs after this function returns
+  trap 'rm -rf "$ZIP_TMP"' EXIT
+  cmd_assemble "$ZIP_TMP" diag
+  (cd "$ZIP_TMP" && zip -q -r -X "$zip" PERSEUS-KIT) || die "zip failed"
+  unzip -tq "$zip" || die "unzip -t failed on $zip"
+  log "$zip: $(( $(stat -c %s "$zip") / 1000000 )) MB, sha256 $(sha256sum "$zip" | cut -d' ' -f1)"
+}
+
 case "${1:-}" in
   src) cmd_src ;;
   binaries) cmd_binaries ;;
   test) cmd_test ;;
   models) cmd_models "${2:-standard}" ;;
   assemble) shift; cmd_assemble "$@" ;;
-  *) sed -n '2,12p' "$0"; exit 2 ;;
+  zip) cmd_zip "${2:-}" ;;
+  *) sed -n '2,13p' "$0"; exit 2 ;;
 esac
