@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Builds kernels/test_ssse3_kernels.c and llama.cpp's tests/test-tiled-mulmat.cpp against the
-# stock llama.cpp build of each CPU variant (rebuilding that variant's ggml libraries first),
-# inside the kit's build image.
+# Builds the self-tests against the stock llama.cpp build of each CPU variant (rebuilding that
+# variant's ggml libraries first), inside the kit's build image:
+#   test_ssse3_kernels.c, llama.cpp's tests/test-tiled-mulmat.cpp, lut_bench.c (standalone) and,
+#   for the pre-AVX variants (the only ones with the IQ3_S repack), test_repack_mulmat.c.
 #   kernels/build-test.sh [variant...]     default: penryn nehalem haswell
-# Output: $WORK/test/test_ssse3_kernels-<variant>, $WORK/test/test-tiled-mulmat-<variant>
+# Output: $WORK/test/<test>-<variant>
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="${PERSEUS_KIT_WORK:-$HOME/.cache/perseus-kit}"
@@ -23,6 +24,11 @@ for v in $VARIANTS; do
         -o /work/test/test_ssse3_kernels-$v
       g++ -O2 $march -mtune=generic -static -pthread -I\$S/ggml/include \$S/tests/test-tiled-mulmat.cpp \
         \$B/libggml.a \$B/libggml-cpu.a \$B/libggml-base.a -lm -o /work/test/test-tiled-mulmat-$v
+      gcc -O2 $march -mtune=generic -Wall -Wextra -static -o /work/test/test-lut-$v /kernels/lut_bench.c
+      if [ $v != haswell ]; then
+        gcc -O2 $march -mtune=generic -Wall -Wextra -static -pthread -I\$S/ggml/include /kernels/test_repack_mulmat.c \
+          \$B/libggml.a \$B/libggml-cpu.a \$B/libggml-base.a -lstdc++ -lm -o /work/test/test-repack-mulmat-$v
+      fi
     "
-  echo "built $WORK/test/test_ssse3_kernels-$v $WORK/test/test-tiled-mulmat-$v"
+  echo "built the $v self-tests in $WORK/test"
 done

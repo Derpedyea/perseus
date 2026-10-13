@@ -72,6 +72,8 @@ plan() {
   S 2-00-kernel-selftest step_kernel_selftest
   S 2-00b-tiled-selftest step_tiled_selftest
   S 2-00c-kernel-bench step_kernel_bench
+  S 2-00d-repack-selftest step_repack_selftest
+  S 2-00e-lut-bench step_lut_bench
   S 2-01-tiny-q4_0-stage step_stage "$TINY_Q40"
   S 2-02-tiny-q4_0-sanity step_sanity "$TINY_Q40"
   S 2-03-tiny-q4_0-bench step_bench "$TINY_Q40" all-sockets cores 128 32 3
@@ -128,6 +130,8 @@ plan() {
   # longer prompts: Saluki on the tiled matmul vs Bonsai (no batched kernel for PQ2_0)
   S 6-17-saluki-prompt-128 step_bench "$SALUKI" all-sockets cores 128 0 1
   S 6-18-bonsai-pq2-prompt-128 step_bench "$BONSAI" all-sockets cores 128 0 1
+  # A/B: 3-07 runs Saluki's IQ3_S weights repacked at load (kernels/), this in the file layout
+  S 6-19-saluki-repack-off step_bench_repack_off "$SALUKI" all-sockets cores 32 16 2
 }
 # Background copy order: what the plan needs first.
 PREFETCH_ORDER="$TINY_Q40 $TINY_Q4KM $BONSAI $SALUKI $Q27 $MTP27 $BONSAI_T"
@@ -475,6 +479,23 @@ step_kernel_bench() {
   run_cmd 300 "$t" bench
 }
 
+# The IQ3_S load-time repack against llama.cpp's own path, through ggml's graph API, on this CPU.
+step_repack_selftest() {
+  need_linux_llama
+  local t="$BIN/stock/$VARIANT/test-repack-mulmat"
+  [ -x "$t" ] || skip "no repack self-test for this build (the IQ3_S repack is for pre-AVX CPUs)"
+  run_cmd 300 "$t"
+}
+
+# Lookup-table kernels (the T-MAC idea) vs the multiply kernel for 2-bit weights, on this CPU.
+step_lut_bench() {
+  need_linux_llama
+  local t="$BIN/stock/$VARIANT/test-lut"
+  [ -x "$t" ] || skip "lookup-table bench not in this kit"
+  note_env
+  run_cmd 300 "$t"
+}
+
 # llama.cpp's tiled matmul (prompt batches of 8+) against its vec_dot path, on this CPU.
 step_tiled_selftest() {
   need_linux_llama
@@ -596,6 +617,7 @@ step_mtp() { # file draft_file|"" n_max(0 = MTP off)
 # A/B variants of the steps above (the kernels/ patches read these at startup)
 step_mtp_mc_off() { export PERSEUS_MC=0; step_mtp "$@"; }
 step_bench_tiled_off() { export GGML_CPU_TILED_MM=0; step_bench "$@"; }
+step_bench_repack_off() { export PERSEUS_REPACK=0; step_bench "$@"; }
 
 # ---------- go ----------
 phase() { log "== Phase $1: $2 (~$3 min on the Mac Pro, rough)"; }

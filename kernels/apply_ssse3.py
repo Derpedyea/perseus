@@ -1001,7 +1001,7 @@ void perseus_iq3s_dot_p(int n, float * s, const void * vx, const void * vy, size
         }
         float sumf[4] = {0};
         for (int i = 0; i < n/QK_K; ++i) {
-            const __m128i sc16 = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i *)x[i].sc), _mm_setzero_si128());
+                const __m128i sc16 = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i *)x[i].sc), _mm_setzero_si128());
             __m128i a0 = _mm_setzero_si128(), a1 = a0, a2 = a0, a3 = a0;
             for (int ib = 0; ib < QK_K/32; ++ib) {
                 const __m128i q = _mm_loadu_si128((const __m128i *)(x[i].qs + 16*ib));

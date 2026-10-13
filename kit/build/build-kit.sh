@@ -102,6 +102,8 @@ cmd_binaries() {
   for v in $VARIANTS; do
     cp "$WORK/test/test_ssse3_kernels-$v" "$WORK/bin/stock/$v/test-ssse3-kernels"
     cp "$WORK/test/test-tiled-mulmat-$v" "$WORK/bin/stock/$v/test-tiled-mulmat"
+    cp "$WORK/test/test-lut-$v" "$WORK/bin/stock/$v/test-lut"
+    if [ "$v" != haswell ]; then cp "$WORK/test/test-repack-mulmat-$v" "$WORK/bin/stock/$v/test-repack-mulmat"; fi
   done
   log "binaries in $WORK/bin"
 }
@@ -143,6 +145,9 @@ cmd_test() {
   check "SSSE3 kernels match reference on Nehalem" 0 "$(qemu_exit Nehalem /work/bin/stock/nehalem/test-ssse3-kernels 20)"
   check "tiled matmul matches reference on Penryn"  0 "$(qemu_exit Penryn /work/bin/stock/penryn/test-tiled-mulmat)"
   check "tiled matmul matches reference on Nehalem" 0 "$(qemu_exit Nehalem /work/bin/stock/nehalem/test-tiled-mulmat)"
+  check "IQ3_S repack matches reference on Penryn"  0 "$(qemu_exit Penryn /work/bin/stock/penryn/test-repack-mulmat)"
+  check "IQ3_S repack matches reference on Nehalem" 0 "$(qemu_exit Nehalem /work/bin/stock/nehalem/test-repack-mulmat)"
+  check "lookup-table kernels exact on Penryn"      0 "$(qemu_exit Penryn /work/bin/stock/penryn/test-lut)"
   local v
   for v in penryn:Penryn nehalem:Nehalem; do
     local build="${v%%:*}" cpu="${v##*:}"

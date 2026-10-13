@@ -29,12 +29,16 @@ def main():
     label = sys.argv[4] if len(sys.argv) > 4 else None
 
     # ns per 256 weights, one column, from the kernel bench: "bench iq2_xxs_q8_K nc=1 single 12.9 ..."
-    ns = {}
+    # a "repacked" row (the load-time layout llama.cpp then runs, see repack.cpp) replaces the
+    # format's "single" row, and its bigger blocks count in the bytes read per token
+    ns, repacked = {}, set()
     for f in glob.glob(os.path.join(run, "steps", "*-kernel-bench", "stdout.txt")):
         for line in open(f):
-            m = re.match(r"bench (\w+?)_q8_\w+ +nc=1 single +([0-9.]+)", line)
-            if m:
-                ns[m.group(1).lower()] = float(m.group(2))
+            m = re.match(r"bench (\w+?)_q8_\w+ +nc=1 (single|repacked) +([0-9.]+)", line)
+            if m and (m.group(2) == "repacked" or m.group(1).lower() not in repacked):
+                ns[m.group(1).lower()] = float(m.group(3))
+                if m.group(2) == "repacked":
+                    repacked.add(m.group(1).lower())
     if not ns:
         sys.exit("no kernel bench (step 2-00c) in this run")
 
@@ -61,10 +65,12 @@ def main():
         sys.exit(f"no decode (tg) result in {step}")
 
     # weights and bytes per quant format; formats without a bench row (f32 norms etc.) are tiny
+    repack_growth = {"iq3_s": 144 / 110}  # block_iq3s_p vs block_iq3_s
     elems, nbytes, missing = {}, 0, {}
     for t in GGUFReader(model).tensors:
         name = t.tensor_type.name.lower()
-        nbytes += t.n_bytes
+        grow = repack_growth.get(name, 1) if name in repacked and t.name != "token_embd.weight" else 1
+        nbytes += t.n_bytes * grow
         if t.name == "token_embd.weight":
             continue  # a row lookup per token, not a matmul
         if name in ns:
@@ -85,7 +91,7 @@ def main():
     print("kernel time by format (share of the compute estimate):")
     for k, e in sorted(elems.items(), key=lambda kv: -kv[1] / 256 * ns[kv[0]]):
         s = e / 256 * ns[k] * 1e-9 / threads
-        print(f"  {k:8} {100*s/compute_s:5.1f}%  {ns[k]:6.1f} ns/256 weights")
+        print(f"  {k:8} {100*s/compute_s:5.1f}%  {ns[k]:6.1f} ns/256 weights{'  (repacked)' if k in repacked else ''}")
     if missing:
         print("no bench for: " + ", ".join(f"{k} ({v/1e6:.0f} MB)" for k, v in missing.items()))
 

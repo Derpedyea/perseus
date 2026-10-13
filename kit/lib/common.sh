@@ -161,5 +161,8 @@ write_summary() {
     echo
     echo "== kernel bench (ns per 256 weights, 1 thread; nc = tokens per weight read)"
     grep -h '^bench ' "$RUN_DIR"/steps/*-kernel-bench/stdout.txt 2>/dev/null | sed 's/^bench /  /'
+    echo
+    echo "== lookup-table kernels vs multiply (ns per 256 weights, 1 thread)"
+    grep -h '^lut' "$RUN_DIR"/steps/*-lut-bench/stdout.txt 2>/dev/null | sed 's/^/  /'
   } > "$out"
 }

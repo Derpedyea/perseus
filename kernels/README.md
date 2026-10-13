@@ -4,51 +4,62 @@ llama.cpp's x86 dot-product kernels for most quant formats exist only for AVX/AV
 Penryn/Nehalem/Westmere (e.g. the 2012 Mac Pro) they fall back to generic scalar code. Two patches,
 both applied by `kit/build/build-kit.sh binaries` to a clean checkout of the pinned llama.cpp:
 
-- `apply_ssse3.py` (quants.c, quants.h, ggml-cpu.c)
+- `apply_ssse3.py` (quants.c, quants.h, ggml-cpu.c, repack.cpp)
   - SSSE3 vec_dot for q8_0, q2_K, q4_K, iq2_xxs, iq2_xs, iq2_s, iq3_xxs, iq3_s, iq1_s, iq1_m,
     iq4_xs: the integer math of the AVX paths (already 128-bit), each block summed exactly
     before one float multiply. iq1_s/iq1_m go further: weights 8*grid +- 1 become unsigned
     u = 8*(grid+1) + {0,2} (table generated from iq1s_grid) and the -9*sum(q8) correction comes
-    from bsums, so no sign ops and no separate delta pass (iq1_s 18.7 -> 12.3 ns, iq1_m 28.0 ->
-    25.3 ns per 256 weights; Saluki decode +4.3%).
-  - Multi-column kernels for 2..16 tokens (MTP verification, short batches): each weight block
-    is decoded once and dotted with every column. Bit-identical to the single-column kernels.
-    `PERSEUS_MC=0` turns them off for A/B runs.
+    from bsums, so no sign ops and no separate delta pass.
+  - Multi-column kernels for 2..16 tokens (MTP verification, short batches): each 32-weight
+    sub-block is decoded once into registers and dotted with up to 4 columns. Bit-identical to
+    the single-column kernels. `PERSEUS_MC=0` turns them off.
+  - IQ3_S repacked at load (llama.cpp's CPU_REPACK mechanism): every weight is grid (1..15 odd)
+    times a sign, so one signed 4-bit code; two pshufb decode 32 weights instead of 8 scalar grid
+    lookups. The activations are biased to unsigned once per matmul, so no sign op either; the
+    bias correction is precomputed per block. 144 instead of 110 bytes per 256 weights.
+    `PERSEUS_REPACK=0` (or llama.cpp's `-nr`) keeps the file layout.
 - `apply_tiled_sse.py` (ggml-cpu/tiled): turns on llama.cpp's tiled matmul (batches of 8+, i.e.
   prompt processing) for SSE4.1. Upstream gates it on AVX, but its AVX1 microkernel is 128-bit
   integer code whose newest instruction is SSE4.1. `GGML_CPU_TILED_MM=0` turns it off.
 
-Tests (kit step 2-00 / 2-00b on the lab box; `build-kit.sh test` under emulated Penryn/Nehalem):
+Tests (kit steps 2-00, 2-00b, 2-00d on the lab box; `build-kit.sh test` under emulated Penryn/Nehalem):
 - `test_ssse3_kernels.c`: vec_dot vs llama.cpp's generic code on random blocks (9 formats bit
-  for bit; q4_K, iq4_xs within 5e-8 relative), then every multi-column result vs the
-  single-column kernel, bit for bit. A broken kernel fails it (mutation-checked), and it refuses
-  vacuous passes (all-zero results, insensitive to inputs, multi-column path switched off).
-- llama.cpp's `tests/test-tiled-mulmat.cpp`: tiled vs vec_dot. 88/88 with `--fuzz` on SSE. It
-  also passes if the tiled path is off, so engagement is shown by timing (`GGML_CPU_TILED_MM=0`
-  vs default: Qwen3.5-0.8B Q4_K_M pp128 194 -> 427 tok/s on the penryn build).
+  for bit; q4_K, iq4_xs within 5e-8 relative), every multi-column result vs the single-column
+  kernel, and the repacked IQ3_S vs the original, bit for bit. Mutation-checked (an off-by-one in
+  a correction term fails it), and it refuses vacuous passes (all-zero results, insensitive to
+  inputs, multi-column path off).
+- `test_repack_mulmat.c`: the repack through ggml's graph API (buffer, traits, threads, tiles,
+  3-D activations) vs llama.cpp's own path: 396 cases bit-identical. Fails if the repack is off.
+- llama.cpp's `tests/test-tiled-mulmat.cpp`: tiled vs vec_dot. 88/88 with `--fuzz` on SSE. It also
+  passes if the tiled path is off, so engagement is shown by timing.
+- End to end: Saluki's output is byte-identical with the multi-column kernels on and off, and
+  with the repack on and off (tiled off, so both sides take the bit-exact path).
 
-`gap.py RESULTS_DIR MODEL STEP` turns a lab run into the decode budget: measured tok/s vs the
-bandwidth ceiling (membw / bytes per token) and the kernel compute ceiling (bench x weights per
-format / cores), plus each format's share of kernel time. That picks the next target.
-
-`test-ssse3-kernels bench` (kit step 2-00c) times every kernel on one thread with the weights in
-L2: ns per 256 weights, single-column and multi-column at 1/2/4/8 tokens. On the lab box this says
-which formats are compute-bound there and what each extra MTP token costs.
+`test-ssse3-kernels bench` (kit step 2-00c): ns per 256 weights, one thread, weights in L2,
+single-column, multi-column at 1/2/4/8 tokens and repacked IQ3_S. `gap.py RESULTS_DIR MODEL STEP`
+turns a lab run into the decode budget: measured tok/s vs the bandwidth ceiling (membw / bytes
+per token, repacked bytes included) and the kernel ceiling (bench x weights per format / cores).
 
 Saluki 27B, Ryzen 7700X, 8 threads, old-CPU (nehalem) build, tok/s:
 
 | | before | after |
 |---|---|---|
-| generate | 0.58 (generic) | 3.83 (SSSE3 vec_dot; AVX2 build 3.97) |
-| prompt, 32 tokens | 0.63 | 8.05 (tiled; 4.76 without) |
-| prompt, 128 tokens | | 10.6 (tiled; 4.65 without) |
-| 4-token batch (= one MTP check) | | 6.18 (multi-column; 4.54 without) |
-| MTP draft 3, 82% accepted | | 4.24 (multi-column; 3.24 without, slower than no MTP) |
+| generate | 0.58 (generic) | 4.17 best of 9 (AVX2 build 5.0); 3.77 with the 10:17 kernels |
+| prompt, 128 tokens | 4.65 | 10.6 (tiled; repack on or off) |
+| MTP draft 3, 82% accepted | 3.24 | 5.15 (multi-column in registers; 3.83 plain decoding) |
 
-Where the multi-column time goes (Ryzen, 1 thread, ns per 256 weights): iq2_xxs single 12.9;
-multi-column ~16 to decode a block into its buffer plus ~6.8 per token. Storing and reloading
-the decoded block costs about as much as the whole single-column kernel, so 4 tokens cost ~3.3x
-one. q2_K's single-column kernel is so cheap (8.0) that multi-column only breaks even at 4.
-Next, once the lab numbers say it matters: keep the decoded chunk in registers for up to 4
-columns and use the tiled kernels' activation-bias trick (biased activations shared across rows,
-signed weights, per-block correction): ~4 instead of ~6 instructions per 16 weights per token.
+ns per 256 weights, 1 thread: iq1_s 18.7 -> 12.5, iq1_m 28.0 -> 25.5, iq3_s 26.6 -> 8.1
+(repacked); 4 tokens at once: iq2_xxs 51.6 (4x single) -> 25.4, iq3_s 107 -> 17.9.
+
+Measured and not kept:
+- Lookup-table kernels (T-MAC / bitnet.cpp style, `lut_bench.c`, kit step 2-00e): 2-bit weights,
+  multiply kernel 5.08 ns vs exact tables 6.40 vs lossy int8 tables 6.68 (and 4.7% error). A
+  16-entry pshufb table cannot hold exact sums of 4 activations, so it takes two lookups and a
+  widen. Kept as a lab bench in case Westmere's ports disagree.
+- Software prefetch (4 blocks ahead): no measurable gain at 8 threads, and even the off switch
+  cost iq2_xxs 5% (12.7 -> 13.3 ns). Removed.
+- IQ2_XXS / IQ1_M / IQ2_S repacks: these already cost ~12 instructions per 16 weights; a 4-bit
+  layout would add 56-150% bytes for a smaller compute saving, a loss once memory is near its limit.
+- Fusing non-matmul ops: one thread runs within 5% of the kernel-only prediction, so the other
+  ops are not where time goes. At 8 threads the loss (~36% under background load) is contention:
+  kernel demand is ~49 GB/s against 57 GB/s here.
