@@ -1,8 +1,9 @@
 PERSEUS LAB KIT: what to do in the lab
 =======================================
 
-It measures the Mac Pro (CPU, RAM layout, memory speed) and how fast the
-candidate models run on it, and saves everything to this USB. It needs no
+It measures the Mac Pro (CPU, RAM layout, memory speed, its Radeon graphics
+card) and how fast the candidate models run on it, and saves everything to
+this USB. It needs no
 internet and installs nothing. It runs the most important tests first, so
 even a short visit gets the key data, and it continues where it stopped.
 
@@ -15,8 +16,11 @@ even a short visit gets the key data, and it continues where it stopped.
 3. Start it. For a 2-hour visit:
        sudo bash run.sh --for 95
    It stops starting new tests after 95 minutes and finishes the one it is
-   on (a few minutes), leaving time to pack up. Phases 1-5 (~80 min) are
-   the important data; phase 6 is extras.
+   on (a few minutes), leaving time to pack up. Phases 1-4 (~60 min) are
+   the important data; 5-8 are older comparisons and extras.
+   Phase 3 uses the graphics card: the screen may stutter for a moment.
+   Phase 4 waits until the big model (75.8 GB) is copied off the USB,
+   about 35 minutes on the Mac's USB 2.0 ports; phases 1-3 run meanwhile.
 
 4. While it runs, from a second terminal (same folder, also with sudo):
        sudo bash run.sh status    how far it is
@@ -34,7 +38,8 @@ cut it is skipped, not retried; add --retry-failed to retry it.
 
 Disk use: models are copied in the background to /var/tmp/perseus-kit-local
 on the Mac's disk, because USB 2.0 is too slow to load them from repeatedly:
-22.1 GB for the core kit, 39.5 GB for standard, plus ~0.3 GB of programs.
+22.1 GB for the core kit, 39.5 GB for standard, 115.3 GB for full, plus
+~0.4 GB of programs.
 Each copy starts only if the disk has the model's size + 5 GB free; otherwise
 that model runs straight from the USB (slow loads). Delete them when you're
 completely done:
@@ -42,11 +47,17 @@ completely done:
 
 USB format: must be exFAT or ext4. FAT32 can't hold files over 4 GB.
 
+Faster copy (optional): the USB drive is a normal 2.5" SATA SSD in a case.
+If you may open the Mac, the bare drive in a free drive bay copies about 7x
+faster than USB 2.0 (the full kit in ~8 minutes instead of ~55). Run the kit
+from wherever the drive is mounted; nothing else changes.
+
 DIAGNOSTICS-ONLY KIT (no models)
 --------------------------------
 A smaller kit that skips the models: it records the machine facts (CPU, RAM
-layout and speed, NUMA nodes), measures memory bandwidth, and checks and
-times our speed-up code on this CPU. Phases 1-2, about 10 minutes; start it
+layout and speed, NUMA nodes, graphics card), measures memory bandwidth,
+and checks and times our speed-up code on this CPU and graphics card.
+Phases 1-3, about 15 minutes; start it
 the same way (sudo bash run.sh). The model tests show as 'absent'.
 It needs well under 1 GB, so any USB stick works, FAT32 included (the format
 most small sticks ship with). If the same stick later gets the models, just

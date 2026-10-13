@@ -10,7 +10,7 @@ overhead (other ops, sync, compute and memory not overlapping). The compute ceil
 one-thread bench speed holds with every core busy, so it is optimistic.
 
 usage: gap.py RESULTS_DIR MODEL.gguf BENCH_STEP [MEMBW_LABEL]
-  e.g. gap.py results/macpro-2026... models/Underdog-Saluki-27B-1.0-IQ2-mix.gguf 3-07-saluki-all-sockets
+  e.g. gap.py results/macpro-2026... models/Underdog-Saluki-27B-1.0-IQ2-mix.gguf 5-07-saluki-all-sockets
 GGUF_PY=path/to/llama.cpp/gguf-py (the model file is only read for tensor types and sizes), so
 it runs under python3 -I.
 """

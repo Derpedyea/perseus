@@ -172,6 +172,23 @@ write_summary() {
     echo "== speculative decoding (MTP steps; mtp-off = plain decoding)"
     grep -H -E 'decoded .* speed:|accept +=|[^t] eval time =' "$RUN_DIR"/steps/*mtp*/stderr.txt 2>/dev/null | sed "s|$RUN_DIR/steps/||; s|/stderr.txt:|: |"
     echo
+    echo "== GPU"
+    sed -n 's/^picked: /  picked: /p' "$RUN_DIR"/steps/*-gpu-probe/stdout.txt 2>/dev/null
+    for f in "$RUN_DIR"/steps/*-gpu-probe/reason; do [ -f "$f" ] && echo "  no GPU: $(head -c 300 "$f")"; done
+    grep -h -E '^== |tests passed' "$RUN_DIR"/steps/*-gpu-selftest/stdout.txt 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g; s/^ */  /'
+    if [ -f "$(ls "$RUN_DIR"/steps/*-gpu-op-bench/stdout.txt 2>/dev/null | head -1)" ]; then
+      echo "  Flash-Next decode matmuls on the GPU, slowest first: us per call, GB/s (a tensor small enough to"
+      echo "  stay in the GPU's cache between runs reads faster than VRAM), weight format, tensor"
+      # test-backend-ops colours the GB/s figure even into a file: strip ANSI codes first
+      sed 's/\x1b\[[0-9;]*m//g' "$RUN_DIR"/steps/*-gpu-op-bench/stdout.txt \
+        | sed -n 's/.*MUL_MAT(name=\([^,]*\),type=[^,]*,ne=\[[0-9]*,1,1,1\],.*sources=\([A-Za-z0-9_]*\)\[.*- *\([0-9.]*\) us\/run - .* - *\([0-9.]*\) GB\/s.*/\3 \4 \2 \1/p' \
+        | sort -rn | head -15 | awk '{printf "    %9s us %8s GB/s  %-8s %s\n", $1, $2, $3, $4}'
+    fi
+    echo
+    echo "== Flash-Next (llama-completion, 128 tokens: cpu-gpu = attention etc. on the GPU, experts on the CPU)"
+    grep -H -E 'prompt eval time =|[^t] eval time =|common_params_fit_impl: +- ' "$RUN_DIR"/steps/*-flashnext-cpu-*/stderr.txt 2>/dev/null \
+      | sed "s|$RUN_DIR/steps/||; s|/stderr.txt:|: |; s/[0-9.]* I common_params_fit_impl: *- /GPU placement: /"
+    echo
     echo "== kernel bench (ns per 256 weights, 1 thread; nc = tokens per weight read)"
     grep -h '^bench ' "$RUN_DIR"/steps/*-kernel-bench/stdout.txt 2>/dev/null | sed 's/^bench /  /'
     echo

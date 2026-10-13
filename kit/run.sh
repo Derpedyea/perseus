@@ -54,6 +54,8 @@ BONSAI_T=Ternary-Bonsai-2-27B-PTQ1_0.gguf
 SALUKI=Underdog-Saluki-27B-1.0-IQ2-mix.gguf
 Q27=Qwen3.8-27B-Q4_0.gguf
 MTP27=mtp-Qwen3.8-27B-Q4_0.gguf
+FLASHNEXT=Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf
+FLASHNEXT_NGRAM=Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00002-of-00002.gguf
 
 # ---------- the plan: most decision-relevant data first ----------
 # phase NUM TITLE MINUTES (rough estimate for the Mac Pro) / S STEP-ID FUNCTION ARGS...
@@ -75,7 +77,7 @@ plan() {
   S 2-00c-kernel-bench step_kernel_bench test-ssse3-kernels
   S 2-00d-repack-selftest step_repack_selftest
   S 2-00e-lut-bench step_lut_bench
-  # Flash-Next formats (q6_K, q5_K, iq4_nl, q2_0) + q4_1; q6_K/q5_K/q4_1 run in phase 4's Qwen3.8-27B
+  # Flash-Next formats (q6_K, q5_K, iq4_nl, q2_0) + q4_1; q6_K/q5_K/q4_1 run in phase 6's Qwen3.8-27B
   S 2-00f-flashnext-kernel-selftest step_kernel_selftest test-fn-kernels
   S 2-00g-flashnext-kernel-bench step_kernel_bench test-fn-kernels
   S 2-01-tiny-q4_0-stage step_stage "$TINY_Q40"
@@ -84,61 +86,80 @@ plan() {
   S 2-04-tiny-q4km-stage step_stage "$TINY_Q4KM"
   S 2-05-tiny-q4km-bench step_bench "$TINY_Q4KM" all-sockets cores 128 32 3
 
-  phase 3 "compact 27Bs: Bonsai 2 (PQ2_0) vs Saluki (IQ2-mix)" 25
-  S 3-01-bonsai-pq2-stage step_stage "$BONSAI"
-  S 3-02-bonsai-pq2-sanity step_sanity "$BONSAI"
-  S 3-03-bonsai-pq2-all-sockets step_bench "$BONSAI" all-sockets cores 32 16 2
-  S 3-04-bonsai-pq2-one-socket step_bench "$BONSAI" one-socket cores 32 16 2
+  # The lab box's AMD RX 580 through llama.cpp's Vulkan backend. 3-01 picks the GPU; 3-02 checks
+  # it computes what the CPU does for every op the GPU will run (no model needed); 3-03 times
+  # Flash-Next's GPU-side matmuls on it (GB/s per weight format).
+  phase 3 "GPU checks" 10
+  S 3-01-gpu-probe step_gpu_probe
+  S 3-02-gpu-selftest step_gpu_selftest
+  S 3-03-gpu-op-bench step_gpu_op_bench
+  S 3-04-tiny-gpu-sanity step_gpu_sanity "$TINY_Q40"
+  S 3-05-tiny-gpu-bench step_gpu_bench "$TINY_Q40" 128 32 3
+
+  # The target: Qwen3.8-Flash-Next (180B, 6B active), ISTA's GSQ-RCO IQ3_XXS (within 1% of BF16 on
+  # AIME/GPQA/LiveCodeBench). CPU+GPU: attention, shared experts and router on the GPU, routed
+  # experts in RAM on the perseus SSSE3 kernels. Same prompt and settings with and without the GPU.
+  phase 4 "Flash-Next: CPU+GPU vs CPU only" 45
+  S 4-01-flashnext-stage step_stage "$FLASHNEXT"
+  S 4-02-flashnext-ngram-stage step_stage "$FLASHNEXT_NGRAM"
+  S 4-03-flashnext-cpu-gpu step_flashnext gpu
+  S 4-04-flashnext-cpu-only step_flashnext cpu
+
+  phase 5 "compact 27Bs: Bonsai 2 (PQ2_0) vs Saluki (IQ2-mix)" 25
+  S 5-01-bonsai-pq2-stage step_stage "$BONSAI"
+  S 5-02-bonsai-pq2-sanity step_sanity "$BONSAI"
+  S 5-03-bonsai-pq2-all-sockets step_bench "$BONSAI" all-sockets cores 32 16 2
+  S 5-04-bonsai-pq2-one-socket step_bench "$BONSAI" one-socket cores 32 16 2
   # Saluki runs on the perseus SSSE3 kernels (kernels/), checked by 2-00 on this CPU.
-  S 3-05-saluki-stage step_stage "$SALUKI"
-  S 3-06-saluki-sanity step_sanity "$SALUKI"
-  S 3-07-saluki-all-sockets step_bench "$SALUKI" all-sockets cores 32 16 2
-  S 3-08-saluki-one-socket step_bench "$SALUKI" one-socket cores 32 16 2
+  S 5-05-saluki-stage step_stage "$SALUKI"
+  S 5-06-saluki-sanity step_sanity "$SALUKI"
+  S 5-07-saluki-all-sockets step_bench "$SALUKI" all-sockets cores 32 16 2
+  S 5-08-saluki-one-socket step_bench "$SALUKI" one-socket cores 32 16 2
 
-  phase 4 "Qwen3.8-27B Q4_0 reference" 20
-  S 4-01-qwen27-stage step_stage "$Q27"
-  S 4-02-qwen27-sanity step_sanity "$Q27"
-  S 4-03-qwen27-all-sockets step_bench "$Q27" all-sockets cores 32 16 2
-  S 4-04-qwen27-one-socket step_bench "$Q27" one-socket cores 32 16 2
+  phase 6 "Qwen3.8-27B Q4_0 reference" 20
+  S 6-01-qwen27-stage step_stage "$Q27"
+  S 6-02-qwen27-sanity step_sanity "$Q27"
+  S 6-03-qwen27-all-sockets step_bench "$Q27" all-sockets cores 32 16 2
+  S 6-04-qwen27-one-socket step_bench "$Q27" one-socket cores 32 16 2
 
-  phase 5 "MTP speculative decoding" 15
-  S 5-01-mtp-head-stage step_stage "$MTP27"
-  S 5-02-bonsai-pq2-mtp-off step_mtp "$BONSAI" "" 0
-  S 5-03-bonsai-pq2-mtp-3 step_mtp "$BONSAI" "$MTP27" 3
-  S 5-04-qwen27-mtp-off step_mtp "$Q27" "" 0
-  S 5-05-qwen27-mtp-3 step_mtp "$Q27" "$MTP27" 3
-  S 5-06-saluki-mtp-off step_mtp "$SALUKI" "" 0
-  S 5-07-saluki-mtp-3 step_mtp "$SALUKI" "$MTP27" 3
-  # A/B: 5-07 verifies 4 tokens per step with the perseus multi-column kernels, this without
-  S 5-08-saluki-mtp-3-mc-off step_mtp_mc_off "$SALUKI" "$MTP27" 3
+  phase 7 "MTP speculative decoding" 15
+  S 7-01-mtp-head-stage step_stage "$MTP27"
+  S 7-02-bonsai-pq2-mtp-off step_mtp "$BONSAI" "" 0
+  S 7-03-bonsai-pq2-mtp-3 step_mtp "$BONSAI" "$MTP27" 3
+  S 7-04-qwen27-mtp-off step_mtp "$Q27" "" 0
+  S 7-05-qwen27-mtp-3 step_mtp "$Q27" "$MTP27" 3
+  S 7-06-saluki-mtp-off step_mtp "$SALUKI" "" 0
+  S 7-07-saluki-mtp-3 step_mtp "$SALUKI" "$MTP27" 3
+  # A/B: 7-07 verifies 4 tokens per step with the perseus multi-column kernels, this without
+  S 7-08-saluki-mtp-3-mc-off step_mtp_mc_off "$SALUKI" "$MTP27" 3
 
-  phase 6 "extras" 60
-  S 6-01-bonsai-pq2-stock-layout step_bench "$BONSAI" naive cores 32 16 2
-  S 6-02-qwen27-stock-layout step_bench "$Q27" naive cores 32 16 2
-  S 6-03-bonsai-ptq1-stage step_stage "$BONSAI_T"
-  S 6-04-bonsai-ptq1-sanity step_sanity "$BONSAI_T"
-  S 6-05-bonsai-ptq1-all-sockets step_bench "$BONSAI_T" all-sockets cores 32 16 2
-  S 6-06-bonsai-ptq1-one-socket step_bench "$BONSAI_T" one-socket cores 32 16 2
-  S 6-07-bonsai-pq2-hyperthreads step_bench "$BONSAI" all-sockets smt 32 16 2
-  S 6-08-qwen27-hyperthreads step_bench "$Q27" all-sockets smt 32 16 2
-  S 6-09-bonsai-pq2-mtp-2 step_mtp "$BONSAI" "$MTP27" 2
-  S 6-10-qwen27-mtp-2 step_mtp "$Q27" "$MTP27" 2
-  S 6-11-bonsai-pq2-cold-distribute step_bench "$BONSAI" distribute-cold cores 32 16 2
-  S 6-12-qwen27-cold-distribute step_bench "$Q27" distribute-cold cores 32 16 2
-  S 6-13-saluki-stock-layout step_bench "$SALUKI" naive cores 32 16 2
-  # A/B: 3-07's prompt numbers use the tiled matmul (enabled on SSE4.1 by kernels/), this without
-  S 6-14-saluki-tiled-off step_bench_tiled_off "$SALUKI" all-sockets cores 32 16 2
+  phase 8 "extras" 60
+  S 8-01-bonsai-pq2-stock-layout step_bench "$BONSAI" naive cores 32 16 2
+  S 8-02-qwen27-stock-layout step_bench "$Q27" naive cores 32 16 2
+  S 8-03-bonsai-ptq1-stage step_stage "$BONSAI_T"
+  S 8-04-bonsai-ptq1-sanity step_sanity "$BONSAI_T"
+  S 8-05-bonsai-ptq1-all-sockets step_bench "$BONSAI_T" all-sockets cores 32 16 2
+  S 8-06-bonsai-ptq1-one-socket step_bench "$BONSAI_T" one-socket cores 32 16 2
+  S 8-07-bonsai-pq2-hyperthreads step_bench "$BONSAI" all-sockets smt 32 16 2
+  S 8-08-qwen27-hyperthreads step_bench "$Q27" all-sockets smt 32 16 2
+  S 8-09-bonsai-pq2-mtp-2 step_mtp "$BONSAI" "$MTP27" 2
+  S 8-10-qwen27-mtp-2 step_mtp "$Q27" "$MTP27" 2
+  S 8-11-bonsai-pq2-cold-distribute step_bench "$BONSAI" distribute-cold cores 32 16 2
+  S 8-12-qwen27-cold-distribute step_bench "$Q27" distribute-cold cores 32 16 2
+  S 8-13-saluki-stock-layout step_bench "$SALUKI" naive cores 32 16 2
+  # A/B: 5-07's prompt numbers use the tiled matmul (enabled on SSE4.1 by kernels/), this without
+  S 8-14-saluki-tiled-off step_bench_tiled_off "$SALUKI" all-sockets cores 32 16 2
   # Saluki's IQ kernels are table-lookup heavy: do hyperthreads hide that, and is draft 2 better?
-  S 6-15-saluki-hyperthreads step_bench "$SALUKI" all-sockets smt 32 16 2
-  S 6-16-saluki-mtp-2 step_mtp "$SALUKI" "$MTP27" 2
+  S 8-15-saluki-hyperthreads step_bench "$SALUKI" all-sockets smt 32 16 2
+  S 8-16-saluki-mtp-2 step_mtp "$SALUKI" "$MTP27" 2
   # longer prompts: Saluki on the tiled matmul vs Bonsai (no batched kernel for PQ2_0)
-  S 6-17-saluki-prompt-128 step_bench "$SALUKI" all-sockets cores 128 0 1
-  S 6-18-bonsai-pq2-prompt-128 step_bench "$BONSAI" all-sockets cores 128 0 1
-  # A/B: 3-07 runs Saluki's IQ3_S weights repacked at load (kernels/), this in the file layout
-  S 6-19-saluki-repack-off step_bench_repack_off "$SALUKI" all-sockets cores 32 16 2
+  S 8-17-saluki-prompt-128 step_bench "$SALUKI" all-sockets cores 128 0 1
+  S 8-18-bonsai-pq2-prompt-128 step_bench "$BONSAI" all-sockets cores 128 0 1
+  # A/B: 5-07 runs Saluki's IQ3_S weights repacked at load (kernels/), this in the file layout
+  S 8-19-saluki-repack-off step_bench_repack_off "$SALUKI" all-sockets cores 32 16 2
 }
 # Background copy order: what the plan needs first.
-PREFETCH_ORDER="$TINY_Q40 $TINY_Q4KM $BONSAI $SALUKI $Q27 $MTP27 $BONSAI_T"
+PREFETCH_ORDER="$TINY_Q40 $TINY_Q4KM $FLASHNEXT $FLASHNEXT_NGRAM $BONSAI $SALUKI $Q27 $MTP27 $BONSAI_T"
 
 # ---------- lock owner (shared by run / status / pause / stop) ----------
 # The lock holds "HOST PID PGID". OWNER_* are set by owner_alive.
@@ -280,6 +301,11 @@ gate() {
 # ---------- tools: binaries, topology, CPU variant ----------
 mkdir -p "$LOCAL" && touch "$LOCAL/.perseus-kit" || { echo "Can't create $LOCAL"; exit 1; }
 BIN="$LOCAL/bin"
+VK_BIN="$BIN/stock-vk/nehalem"  # Vulkan build (the lab's GPU); nehalem only, see need_vk_build
+# GPU drivers keep a shader cache on disk (Mesa: $HOME/.cache/mesa_shader_cache, /root/.cache under
+# sudo). Keep it, and any other XDG cache, inside $LOCAL, which 'run.sh clean' removes.
+MESA_SHADER_CACHE_DIR="$LOCAL/cache/mesa_shader_cache" XDG_CACHE_HOME="$LOCAL/cache"
+export MESA_SHADER_CACHE_DIR XDG_CACHE_HOME
 MEMBW=""
 VARIANT=none
 NODES=1 NCPUS=1 NPHYS=1 NODE0_NCPUS=1 NODE0_NPHYS=1 ALL_PHYS=0
@@ -466,6 +492,10 @@ step_sysinfo() {
   cap disks 'lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,ROTA,TRAN'
   cap df 'df -hT'
   cap pci 'lspci -nn'
+  # GPU: board maker (subsystem ids), VRAM, clocks, PCIe link, kernel driver, who may open the
+  # render node, and which Vulkan drivers are installed (the GPU steps need Mesa's RADV)
+  cap gpu 'lspci -nnk | grep -A4 -E "VGA|3D controller|Display controller"; for c in /sys/class/drm/card[0-9]*; do [ -e $c/device/vendor ] || continue; echo "== $c"; for f in vendor device subsystem_vendor subsystem_device revision mem_info_vram_total mem_info_vram_used mem_info_vis_vram_total current_link_speed current_link_width max_link_speed max_link_width power_dpm_force_performance_level pp_dpm_sclk pp_dpm_mclk; do printf "%s: " $f; tr "\n" " " < $c/device/$f; echo; done; done'
+  cap vulkan 'ls -l /dev/dri; getfacl -p /dev/dri/renderD* 2>&1; id; ls -l /usr/share/vulkan/icd.d /etc/vulkan/icd.d 2>&1; dpkg -l 2>/dev/null | grep -i -E "vulkan|mesa|amdgpu"; vulkaninfo --summary'
   cap usb 'lsusb; lsusb -t'
   cap glibc 'ldd --version'
   cap tools 'for t in gcc cc clang cmake make git python3 numactl perf dmidecode lscpu sha256sum timeout sudo setsid ionice; do printf "%-10s %s\n" $t "$(command -v $t || echo MISSING)"; done'
@@ -630,6 +660,176 @@ step_mtp() { # file draft_file|"" n_max(0 = MTP off)
   fi
 }
 
+# ---------- GPU (Vulkan build) ----------
+# Ends the step unless this box can start the Vulkan build: it is the nehalem build (SSE4.2), and
+# it links Ubuntu 24.04's glibc (glibc-min: the newest symbol version it uses).
+need_vk_build() {
+  [ -x "$VK_BIN/llama-completion" ] || skip "no Vulkan build in this kit"
+  case "$VARIANT" in nehalem|haswell) ;; *) skip "the Vulkan build needs SSE4.2; this CPU runs the $VARIANT build" ;; esac
+  local need have
+  need=$(cat "$VK_BIN/glibc-min" 2>/dev/null)
+  case "$need" in 2.[0-9]*) ;; *) echo "kit error: $VK_BIN/glibc-min is missing or malformed ('$need')" >&2; exit 1 ;; esac
+  have=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')
+  [ -n "$have" ] || skip "can't tell this box's glibc version; the Vulkan build needs glibc $need"
+  [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -1)" = "$need" ] \
+    || skip "the Vulkan build needs glibc $need or newer; this box has $have"
+}
+
+# Picks the GPU every later GPU step uses: the first discrete Vulkan device (uma: 0), so an iGPU
+# or a software rasteriser never stands in for it. Records it by llama.cpp's device name (VulkanN,
+# what -dev / -b take) in $RUN_DIR/gpu.env, and its full name in gpu-name.txt. Not by
+# GGML_VK_VISIBLE_DEVICES: that indexes Vulkan's raw device list, which can differ from VulkanN.
+step_gpu_probe() {
+  need_linux_llama
+  need_vk_build
+  rm -f "$RUN_DIR/gpu.env" "$RUN_DIR/gpu-name.txt"
+  unset GGML_VK_VISIBLE_DEVICES  # llama.cpp's default device list, the one VulkanN names refer to
+  run_cmd 120 "$VK_BIN/llama-bench" --list-devices > "$STEP_DIR/devices.txt" 2>&1
+  local rc=$?
+  cat "$STEP_DIR/devices.txt"
+  [ "$rc" = 0 ] || return "$rc"
+  # ggml_vulkan: 0 = AMD Radeon RX 580 Series (RADV POLARIS10) (radv) | uma: 0 | fp16: ...
+  #   Vulkan0: AMD Radeon RX 580 Series (RADV POLARIS10) (8192 MiB, 7930 MiB free)
+  local idx line name total free
+  idx=$(sed -n 's/^ggml_vulkan: \([0-9][0-9]*\) = .* | uma: 0 | .*/\1/p' "$STEP_DIR/devices.txt" | head -1)
+  if [ -z "$idx" ]; then
+    local seen; seen=$(grep -E '^ggml_vulkan: [0-9]+ = ' "$STEP_DIR/devices.txt" | tr '\n' ' ' | head -c 400)
+    [ -n "$seen" ] || skip "no Vulkan devices: no GPU driver, or no access to /dev/dri (see steps/1-02-sysinfo/vulkan.txt)"
+    skip "no discrete Vulkan GPU, only: $seen"
+  fi
+  line=$(grep -E "^ *Vulkan$idx: " "$STEP_DIR/devices.txt" | head -1)
+  name=$(gpu_line_name "$line")
+  total=$(echo "$line" | sed -n 's/.*(\([0-9][0-9]*\) MiB, [0-9][0-9]* MiB free)$/\1/p')
+  free=$(echo "$line" | sed -n 's/.*([0-9][0-9]* MiB, \([0-9][0-9]*\) MiB free)$/\1/p')
+  [ -n "$name" ] && [ -n "$total" ] && [ -n "$free" ] || { echo "can't read name/VRAM from: $line" >&2; return 1; }
+  printf '%s\n' "$name" > "$RUN_DIR/gpu-name.txt"
+  printf 'GPU_DEV=Vulkan%s\nGPU_VRAM_MIB=%s\nGPU_FREE_MIB=%s\n' "$idx" "$total" "$free" > "$RUN_DIR/gpu.env"
+  echo "picked: $line"
+}
+
+# "  Vulkan0: AMD Radeon RX 580 Series (RADV POLARIS10) (8192 MiB, 7930 MiB free)" -> the name
+gpu_line_name() { echo "$1" | sed -n 's/^ *Vulkan[0-9][0-9]*: \(.*\) ([0-9][0-9]* MiB, [0-9][0-9]* MiB free)$/\1/p'; }
+
+# For GPU steps: ends the step unless 3-01 picked a GPU, and fails it unless that GPU is still the
+# one llama.cpp calls $GPU_DEV (a driver gone or a device added since 3-01, e.g. across a resume,
+# must not turn into CPU numbers or a different GPU's). Commands select it with -dev / -b $GPU_DEV.
+need_gpu() {
+  need_vk_build
+  [ -f "$RUN_DIR/gpu.env" ] || skip "no usable GPU (see steps/3-01-gpu-probe)"
+  # Our own file, but check its shape before sourcing it.
+  if grep -qvE '^GPU_DEV=Vulkan[0-9]+$|^GPU_(VRAM|FREE)_MIB=[0-9]+$' "$RUN_DIR/gpu.env"; then
+    echo "malformed $RUN_DIR/gpu.env" >&2; exit 1
+  fi
+  . "$RUN_DIR/gpu.env"
+  unset GGML_VK_VISIBLE_DEVICES  # VulkanN names refer to llama.cpp's default device list
+  local want now rc
+  want=$(cat "$RUN_DIR/gpu-name.txt" 2>/dev/null)
+  # bounded like every command (a driver stuck after a GPU reset can hang device listing)
+  run_cmd 120 "$VK_BIN/llama-bench" --list-devices > "$STEP_DIR/devices-now.txt" 2>&1; rc=$?
+  case "$rc" in 124|137) echo "listing Vulkan devices hung (120 s)" >&2; exit "$rc" ;; esac
+  now=$(gpu_line_name "$(grep -E "^ *$GPU_DEV: " "$STEP_DIR/devices-now.txt" | head -1)")
+  [ -n "$want" ] && [ "$now" = "$want" ] || { echo "3-01 picked $GPU_DEV = '$want'; now $GPU_DEV is '${now:-not there}'" >&2; exit 1; }
+}
+
+# test-backend-ops on the picked GPU. Its exit status alone proves nothing: it returns 0 when the
+# named backend isn't there (it skips it), so the output must show that backend ran real cases.
+gpu_tbo() { # timeout mode args...
+  local t="$1" mode="$2" out="$STEP_DIR/tbo.out" rc; shift 2
+  run_cmd "$t" "$VK_BIN/test-backend-ops" "$mode" -b "$GPU_DEV" "$@" > "$out" 2>&1; rc=$?
+  cat "$out"
+  [ "$rc" = 0 ] || return "$rc"
+  local plain; plain=$(sed 's/\x1b\[[0-9;]*m//g' "$out")
+  echo "$plain" | grep -qx "  Backend $GPU_DEV: OK" || { echo "test-backend-ops did not run on $GPU_DEV" >&2; return 1; }
+  case "$mode" in
+    test) echo "$plain" | grep -qE '^ +([1-9][0-9]*)/\1 tests passed$' || { echo "no test cases ran on $GPU_DEV" >&2; return 1; } ;;
+    # perf mode carries on past a case that fails and still exits 0
+    perf) echo "$plain" | grep -q ' GB/s' || { echo "no op was timed on $GPU_DEV" >&2; return 1; }
+          if echo "$plain" | grep -qE 'failed to allocate|graph_compute failed'; then echo "a perf case failed on $GPU_DEV" >&2; return 1; fi ;;
+  esac
+}
+
+# The GPU against the CPU for every op type the GPU will run (test-backend-ops: same op, same
+# inputs, results compared). gpu-ops/MODEL.txt (made by build-kit.sh) replays the model's own ops
+# and shapes; the op types a random-input replay can't judge (kit/build/gpu_ops.py says why) are in
+# MODEL.txt.builtin, and llama.cpp's own cases for those ops and weight types run instead.
+step_gpu_selftest() {
+  need_linux_llama
+  ls "$KIT"/gpu-ops/*.txt >/dev/null 2>&1 || skip "no GPU op lists in this kit (gpu-ops/)"
+  need_gpu
+  local f op filt left_out worst=0
+  keep() { [ "$1" = 0 ] || { [ "$worst" = 124 ] || [ "$worst" = 137 ] || worst=$1; }; }
+  # without its .builtin the ops a replay leaves out would go unchecked: a damaged kit, not a pass
+  for f in "$KIT"/gpu-ops/*.txt; do
+    [ -r "$f.builtin" ] || { echo "gpu-ops/$(basename "$f").builtin is missing or unreadable" >&2; return 1; }
+  done
+  left_out=$(sort -u "$KIT"/gpu-ops/*.txt.builtin) || { echo "can't read gpu-ops/*.builtin" >&2; return 1; }
+  for f in "$KIT"/gpu-ops/*.txt; do
+    echo "== ops of $(basename "$f" .txt)"
+    gpu_tbo 1800 test -j "$NPHYS" --test-file "$f"; keep $?
+  done
+  while IFS="$(printf '\t')" read -r op filt; do
+    [ -n "$op$filt" ] || continue  # no ops left out
+    case "$op" in ''|*[!A-Z0-9_]*) echo "malformed gpu-ops/*.builtin line: $op" >&2; return 1 ;; esac
+    echo "== llama.cpp's $op cases${filt:+ ($filt)}"
+    if [ "$filt" = - ]; then gpu_tbo 1800 test -j "$NPHYS" -o "$op"; else gpu_tbo 1800 test -j "$NPHYS" -o "$op" -p "$filt"; fi
+    keep $?
+  done <<EOF_LEFT_OUT
+$left_out
+EOF_LEFT_OUT
+  return "$worst"
+}
+
+# Time and GB/s of every matmul Flash-Next runs on the GPU, one op at a time (perf mode).
+step_gpu_op_bench() {
+  need_linux_llama
+  need_gpu
+  local f="$KIT/gpu-ops/${FLASHNEXT%.gguf}.txt"
+  [ -f "$f" ] || skip "no Flash-Next op list in this kit (gpu-ops/)"
+  note_env
+  gpu_tbo 900 perf --test-file "$f" -o MUL_MAT
+}
+
+# A model's whole graph on the GPU: readable text means the GPU path works end to end. -lv 4 logs
+# where the weights went ("offloaded N/N layers to GPU").
+step_gpu_sanity() { # file
+  need_linux_llama
+  need_model "$1"
+  need_gpu
+  run_cmd 1200 "$VK_BIN/llama-completion" -m "$MP" -dev "$GPU_DEV" -ngl 99 -c 512 -p "$PROMPT" -n 64 --temp 0 --seed 1 -no-cnv -t "$NPHYS" -lv 4 < /dev/null
+}
+
+step_gpu_bench() { # file n_prompt n_gen reps
+  need_linux_llama
+  need_model "$1"
+  need_gpu
+  note_env
+  run_cmd 1800 "$VK_BIN/llama-bench" -m "$MP" -dev "$GPU_DEV" -ngl 99 -p "$2" -n "$3" -r "$4" -t "$NPHYS" -o jsonl
+}
+
+# Flash-Next, same binary, prompt, context, threads and greedy settings; only the GPU differs.
+#   gpu: llama.cpp's --fit fills the GPU back to front with each layer's attention, shared experts
+#        and router (routed experts stay in RAM) as far as free VRAM goes; -lv 4 logs its choices
+#   cpu: -dev none, so nothing reaches the GPU (with -ngl 0 the prompt's matmuls still would)
+# mmap (the default), not -lm none: a 75.8 GB model read into RAM would sit beside its page cache.
+step_flashnext() { # gpu|cpu
+  need_linux_llama
+  need_model "$FLASHNEXT_NGRAM"
+  local ngram="$MP" need="${M_SIZE[$MI]}"
+  need_model "$FLASHNEXT"
+  need=$(( need + ${M_SIZE[$MI]} ))
+  # llama.cpp finds the n-gram file by name next to the first one
+  [ "$(dirname "$ngram")" = "$(dirname "$MP")" ] || skip "Flash-Next's two files are in different places ($(dirname "$MP"), $(dirname "$ngram")): one was staged, the other not"
+  need_vk_build  # it runs both halves of this A/B
+  local dev
+  # cpu: Vulkan not even loaded, so a GPU driver left wedged by an earlier step can't take the
+  # CPU baseline down with it
+  if [ "$1" = gpu ]; then need_gpu; dev=(-dev "$GPU_DEV" -fit on -lv 4); else dev=(-dev none); GGML_DISABLE_VULKAN=1; export GGML_DISABLE_VULKAN; fi
+  ram_check "$need"
+  note_env
+  run_cmd 3600 "$VK_BIN/llama-completion" -m "$MP" "${dev[@]}" -c 4096 -p "$PROMPT_LONG" -n 128 \
+    --temp 0 --top-k 1 --seed 42 -t "$NPHYS" -no-cnv < /dev/null
+}
+
 # A/B variants of the steps above (the kernels/ patches read these at startup)
 step_mtp_mc_off() { export PERSEUS_MC=0; step_mtp "$@"; }
 step_bench_tiled_off() { export GGML_CPU_TILED_MM=0; step_bench "$@"; }
@@ -647,9 +847,9 @@ log "CPU build: $VARIANT | NUMA nodes: $NODES | cores: $NPHYS (threads $NCPUS)${
 ON_USB=0
 for f in ${M_FILE[@]+"${M_FILE[@]}"}; do [ -f "$KIT/models/$f" ] && ON_USB=$((ON_USB + 1)); done
 if [ "$ON_USB" = 0 ]; then
-  log "Diagnostics kit: no models on this USB, so only phases 1-2 run (~10 min); model tests are marked 'absent'."
+  log "Diagnostics kit: no models on this USB, so only phases 1-3 run (~15 min); model tests are marked 'absent'."
 else
-  log "Phases 1-5 are the important data (~80 min)."
+  log "Phases 1-4 are the important data (~60 min; Flash-Next's copy over USB 2.0 is most of it)."
 fi
 log "Stop any time: Ctrl-C here, or 'bash run.sh pause' / 'bash run.sh stop' in another terminal."
 start_prefetch

@@ -55,11 +55,11 @@ sleep 5
 expect "restart leaves exactly one copier (or none if all copied)" yes "$(c=$(copiers); [ "$c" -le 1 ] && echo yes || echo "no ($c)")"
 
 # 4) pause during a model test: that test finishes ok, the run stops cleanly before the next.
-wait_for "ls $RD/steps/3-02-bonsai-pq2-sanity/started" 900 || bad "never reached 3-02"
+wait_for "ls $RD/steps/5-02-bonsai-pq2-sanity/started" 900 || bad "never reached 5-02"
 has "pause acknowledged" "will stop after the current test" "$(kit pause)"
 runner_gone 900 || bad "runner did not stop after pause"
-expect "paused test completed normally" ok "$(st 3-02-bonsai-pq2-sanity)"
-expect "next test not started" none "$(inside "[ -f $RD/steps/3-03-bonsai-pq2-all-sockets/started ] && echo started || echo none")"
+expect "paused test completed normally" ok "$(st 5-02-bonsai-pq2-sanity)"
+expect "next test not started" none "$(inside "[ -f $RD/steps/5-03-bonsai-pq2-all-sockets/started ] && echo started || echo none")"
 has "pause message" "Paused. Results so far are saved" "$(inside 'tail -3 /tmp/run.out')"
 expect "pause flag cleared" absent "$(inside "[ -f '$P/results/.pause' ] && echo present || echo absent")"
 
@@ -77,7 +77,7 @@ expect "still one results folder (resumed each time)" 1 "$(inside "ls -d '$P'/re
 # 6) What got copied, in plan order, verified.
 inside "cat $RD/prefetch.log" | grep -E '^\[.*\] copy ' | awk '{print $3}' | uniq | tr '\n' ' '; echo
 expect "Bonsai staged + verified" yes "$(inside "[ -f /var/tmp/perseus-kit-local/models/Ternary-Bonsai-2-27B-PQ2_0.gguf.ok ] && echo yes || echo no")"
-has "bench records the background copy state" "background copy:" "$(inside "cat $RD/steps/3-03-bonsai-pq2-all-sockets/env.txt")"
+has "bench records the background copy state" "background copy:" "$(inside "cat $RD/steps/5-03-bonsai-pq2-all-sockets/env.txt")"
 
 docker rm -f "$C" >/dev/null
 rm -rf "$LD"
