@@ -74,7 +74,7 @@ plan() {
   S 2-00c-kernel-bench step_kernel_bench test-ssse3-kernels
   S 2-00d-repack-selftest step_repack_selftest
   S 2-00e-lut-bench step_lut_bench
-  # Flash-Next formats (q6_K, q5_K, iq4_nl, q2_0); q6_K/q5_K also run in phase 4's Qwen3.8-27B
+  # Flash-Next formats (q6_K, q5_K, iq4_nl, q2_0) + q4_1; q6_K/q5_K/q4_1 run in phase 4's Qwen3.8-27B
   S 2-00f-flashnext-kernel-selftest step_kernel_selftest test-fn-kernels
   S 2-00g-flashnext-kernel-bench step_kernel_bench test-fn-kernels
   S 2-01-tiny-q4_0-stage step_stage "$TINY_Q40"

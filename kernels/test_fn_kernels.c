@@ -1,14 +1,14 @@
-// Checks the kernels kernels/apply_ssse3_fn.py adds (q6_K, q5_K, iq4_nl, q2_0) against
+// Checks the kernels kernels/apply_ssse3_fn.py adds (q6_K, q5_K, iq4_nl, q4_1, q2_0) against
 // llama.cpp's generic (scalar) reference on random blocks, the same way test_ssse3_kernels.c
-// checks the others. iq4_nl and q2_0 keep the generic float order and must match bit for bit
-// on SSSE3 builds; q6_K and q5_K must agree within 1e-5 of sum|x*y|.
+// checks the others. iq4_nl, q4_1 and q2_0 keep the generic float order and must match bit for
+// bit on SSSE3 builds; q6_K and q5_K must agree within 1e-5 of sum|x*y|.
 //
 // Guards against a vacuous pass: ggml_cpu_init() runs first (without it every fp16 scale reads
 // as 0), most results must be non-zero, and a control run with one activation nudged must
 // change the result.
 //
 // 'bench' instead of a trial count times them (one thread, weights in L2): ns per 256 weights,
-// next to q4_0 and q8_0 for scale.
+// next to q4_0 and q8_0, the rest of Qwen3.8-27B Q4_0, so kernels/gap.py can cost all of it.
 //
 // Build: kernels/build-test.sh. Exit code 0 = all pass.
 #define GGML_COMMON_DECL_C
@@ -49,6 +49,7 @@ static const kernel_t KERNELS[] = {
     K(q6_K_q8_K,   Q6_K,   0, SIZES_K),
     K(q5_K_q8_K,   Q5_K,   0, SIZES_K),
     K(iq4_nl_q8_0, IQ4_NL, 1, SIZES_32),
+    K(q4_1_q8_1,   Q4_1,   1, SIZES_32),
     K(q2_0_q8_0,   Q2_0,   1, SIZES_64),
 };
 
@@ -63,6 +64,7 @@ static void fill_weights(enum ggml_type type, void * data, int nblocks) {
         const ggml_fp16_t dmin = ggml_fp32_to_fp16(0.02f * rand_uniform());
         switch (type) {
             case GGML_TYPE_Q4_0:   ((block_q4_0 *)blk)->d = d; break;
+            case GGML_TYPE_Q4_1:   ((block_q4_1 *)blk)->d = d; ((block_q4_1 *)blk)->m = dmin; break;
             case GGML_TYPE_Q8_0:   ((block_q8_0 *)blk)->d = d; break;
             case GGML_TYPE_Q6_K:   ((block_q6_K *)blk)->d = d; break;
             case GGML_TYPE_Q5_K:   ((block_q5_K *)blk)->d = d; ((block_q5_K *)blk)->dmin = dmin; break;
@@ -81,6 +83,17 @@ static void fill_activations(enum ggml_type vec_type, void * data, int n) {
         for (int b = 0; b < n / QK8_0; ++b) {
             y[b].d = ggml_fp32_to_fp16(0.05f * rand_uniform());
             for (int j = 0; j < QK8_0; ++j) y[b].qs[j] = (int8_t)((int)(next_u64() % 255) - 127);
+        }
+        return;
+    }
+    if (vec_type == GGML_TYPE_Q8_1) {  // q4_1's activations: s = d * sum(qs)
+        block_q8_1 * y = data;
+        for (int b = 0; b < n / QK8_1; ++b) {
+            const float d = 0.05f * rand_uniform();
+            int sum = 0;
+            for (int j = 0; j < QK8_1; ++j) sum += y[b].qs[j] = (int8_t)((int)(next_u64() % 255) - 127);
+            y[b].d = ggml_fp32_to_fp16(d);
+            y[b].s = ggml_fp32_to_fp16(d * sum);
         }
         return;
     }
@@ -104,6 +117,9 @@ static double abs_dot(enum ggml_type type, enum ggml_type vec_type, const void *
     if (vec_type == GGML_TYPE_Q8_0) {
         const block_q8_0 * yb = y;
         for (int i = 0; i < n; ++i) yf[i] = ggml_fp16_to_fp32(yb[i / QK8_0].d) * yb[i / QK8_0].qs[i % QK8_0];
+    } else if (vec_type == GGML_TYPE_Q8_1) {
+        const block_q8_1 * yb = y;
+        for (int i = 0; i < n; ++i) yf[i] = ggml_fp16_to_fp32(yb[i / QK8_1].d) * yb[i / QK8_1].qs[i % QK8_1];
     } else {
         const block_q8_K * yb = y;
         for (int i = 0; i < n; ++i) yf[i] = yb[i / QK_K].d * yb[i / QK_K].qs[i % QK_K];
@@ -194,7 +210,8 @@ int main(int argc, char ** argv) {
                 ++total;
                 if (a != 0.0f) ++nonzero;
                 {   // control: nudge one activation; the fast result must move
-                    int8_t * q = vt == GGML_TYPE_Q8_0 ? ((block_q8_0 *)y)->qs : ((block_q8_K *)y)->qs;
+                    int8_t * q = vt == GGML_TYPE_Q8_0 ? ((block_q8_0 *)y)->qs
+                               : vt == GGML_TYPE_Q8_1 ? ((block_q8_1 *)y)->qs : ((block_q8_K *)y)->qs;
                     const int8_t saved = q[0];
                     q[0] = (int8_t)(saved > 0 ? saved - 1 : saved + 1);
                     if (vt == GGML_TYPE_Q8_K) ((block_q8_K *)y)->bsums[0] += q[0] - saved;

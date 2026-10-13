@@ -22,7 +22,9 @@ all applied by `kit/build/build-kit.sh binaries` to a clean checkout of the pinn
   SSSE3 vec_dot for the formats Qwen3.8-Flash-Next GGUFs read every token: q6_K (output layer in
   nearly every build, also Qwen3.8-27B Q4_0's), q5_K (dense weights of the low-bit builds, ~1 GB
   of Qwen3.8-27B Q4_0), iq4_nl (expert down projection: row length 640 rules out block-256
-  formats) and q2_0 (lookup-free 2-bit experts; llama.cpp had no x86 kernel at all).
+  formats) and q2_0 (lookup-free 2-bit experts; llama.cpp had no x86 kernel at all). Also q4_1,
+  not a Flash-Next format: 8 ffn_down tensors (446 MB) of Qwen3.8-27B Q4_0, whose upstream x86
+  kernel is AVX-only; generic it was 18% of that model's kernel time from 3% of its bytes.
 - `apply_tiled_sse.py` (ggml-cpu/tiled): turns on llama.cpp's tiled matmul (batches of 8+, i.e.
   prompt processing) for SSE4.1. Upstream gates it on AVX, but its AVX1 microkernel is 128-bit
   integer code whose newest instruction is SSE4.1. `GGML_CPU_TILED_MM=0` turns it off.
@@ -33,8 +35,8 @@ Tests (kit steps 2-00, 2-00b, 2-00d, 2-00f on the lab box; `build-kit.sh test` u
   kernel, and the repacked IQ3_S vs the original, bit for bit. Mutation-checked (an off-by-one in
   a correction term fails it), and it refuses vacuous passes (all-zero results, insensitive to
   inputs, multi-column path off).
-- `test_fn_kernels.c`: the `apply_ssse3_fn.py` kernels vs the generic code the same way (iq4_nl
-  and q2_0 bit for bit; q6_K, q5_K within 1e-5 of sum|x*y|, 3e-8 measured, as upstream's AVX
+- `test_fn_kernels.c`: the `apply_ssse3_fn.py` kernels vs the generic code the same way (iq4_nl,
+  q4_1 and q2_0 bit for bit; q6_K, q5_K within 1e-5 of sum|x*y|, 3e-8 measured, as upstream's AVX
   paths). Each kernel mutation-checked. End to end, a random-weight Flash-Next-architecture model
   (Lynxpda/micro-qwen4exp) with q2_0/iq4_nl experts gives 200 identical greedy tokens with and
   without the patch.
@@ -62,9 +64,11 @@ Saluki 27B, Ryzen 7700X, 8 threads, old-CPU (nehalem) build, tok/s:
 ns per 256 weights, 1 thread: iq1_s 18.7 -> 12.5, iq1_m 28.0 -> 25.5, iq3_s 26.6 -> 8.1
 (repacked); 4 tokens at once: iq2_xxs 51.6 (4x single) -> 25.4, iq3_s 107 -> 17.9.
 
-Flash-Next formats, ns per 256 weights, 1 thread, generic -> SSSE3: q6_K 30.2 -> 10.9, q5_K 28.4 ->
-13.5, iq4_nl 86.5 -> 15.3, q2_0 88.7 -> 16.4 (q4_0: 12.2). q2_0 is still slower than q4_0 at half
-the bytes; a load-time repack would fix that if Westmere is compute-bound (2-00g decides).
+`apply_ssse3_fn.py` formats, ns per 256 weights, 1 thread, generic -> SSSE3: q6_K 30.2 -> 10.9,
+q5_K 28.4 -> 13.5, iq4_nl 86.5 -> 15.3, q4_1 87.1 -> 12.7, q2_0 88.7 -> 16.4 (q4_0: 12.2). q2_0 is
+still slower than q4_0 at half the bytes; a load-time repack would fix that if Westmere is
+compute-bound (2-00g decides). Qwen3.8-27B Q4_0 decode, 2 threads (compute-bound here), kit's
+nehalem build before -> after this patch: 1.10 -> 1.38 tok/s, greedy output identical.
 
 Measured and not kept:
 - Lookup-table kernels (T-MAC / bitnet.cpp style, `lut_bench.c`, kit step 2-00e): 2-bit weights,

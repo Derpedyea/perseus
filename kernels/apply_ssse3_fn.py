@@ -4,10 +4,12 @@
 - q6_K, q5_K: the output layer (Q6_K in nearly every build) and dense weights of the low-bit builds
 - iq4_nl:     the expert down projection (row length 640 rules out every block-256 format)
 - q2_0:       lookup-free 2-bit experts (ISTA GSQ-RCO builds); llama.cpp has no x86 kernel at all
+- q4_1:       not a Flash-Next format, but 8 ffn_down tensors (446 MB) of the kit's Qwen3.8-27B
+              Q4_0; upstream's x86 kernel is AVX-only, and generic q4_1 cost 8x q4_0 per weight
 
 Same approach as apply_ssse3.py: the integer math of the AVX paths on 128-bit vectors, each
 block summed exactly before one float multiply. iq4_nl and q2_0 keep the generic float order
-(bit-exact); q6_K and q5_K sum each block before scaling, as the AVX paths do.
+(bit-exact), as does q4_1; q6_K and q5_K sum each block before scaling, as the AVX paths do.
 
 Runs after apply_ssse3.py (uses its helpers). Tested by kernels/test_fn_kernels.c.
 
@@ -182,6 +184,28 @@ IQ4_NL = r"""#elif defined(__SSSE3__)
 
 """
 
+# q4_1's only x86 branch is AVX ("#if defined(__AVX2__) || defined(__AVX__)" ... "#else" generic);
+# this goes before that "#else". Unsigned 4-bit weights times int8 activations: pmaddubsw pairs
+# stay within +-3840, so the block sum is exact; then the generic code's float expression.
+Q4_1_ANCHOR = "#else\n    UNUSED(nb);\n    UNUSED(x);\n    UNUSED(y);\n    UNUSED(ib);\n    ggml_vec_dot_q4_1_q8_1_generic("
+Q4_1 = r"""#elif defined(__SSSE3__)
+    const __m128i m4b  = _mm_set1_epi8(0x0f);
+    const __m128i mone = _mm_set1_epi16(1);
+    float sumf = 0;
+
+    for (; ib < nb; ++ib) {
+        const __m128i q4bits = _mm_loadu_si128((const __m128i *)x[ib].qs);
+        const __m128i lo = _mm_and_si128(q4bits, m4b);                     // weights 0..15
+        const __m128i hi = _mm_and_si128(_mm_srli_epi16(q4bits, 4), m4b);  // weights 16..31
+        const __m128i p = _mm_add_epi16(_mm_maddubs_epi16(lo, _mm_loadu_si128((const __m128i *)y[ib].qs)),
+                                        _mm_maddubs_epi16(hi, _mm_loadu_si128((const __m128i *)y[ib].qs + 1)));
+        const int sumi = hsum_i32_4_ssse3(_mm_madd_epi16(p, mone));
+        sumf += (GGML_CPU_FP16_TO_FP32(x[ib].d)*GGML_CPU_FP16_TO_FP32(y[ib].d))*sumi + GGML_CPU_FP16_TO_FP32(x[ib].m)*GGML_CPU_FP16_TO_FP32(y[ib].s);
+    }
+
+    *s = sumf;
+"""
+
 # llama.cpp has no x86 q2_0 kernel (arch-fallback.h maps the generic one onto the public name).
 Q2_0_FALLBACK = "#define ggml_vec_dot_q2_0_q8_0_generic ggml_vec_dot_q2_0_q8_0\n"
 Q2_0 = r"""
@@ -288,6 +312,11 @@ def main():
     endif = fn.index("\n#endif\n", avx) + 1
     src = src[:start] + fn[:endif] + IQ4_NL + fn[endif:] + src[end:]
 
+    start, end = function_span(src, "q4_1_q8_1")
+    fn = src[start:end]
+    assert fn.count(Q4_1_ANCHOR) == 1, "q4_1_q8_1 changed upstream"
+    src = src[:start] + fn.replace(Q4_1_ANCHOR, Q4_1 + Q4_1_ANCHOR) + src[end:]
+
     assert "ggml_vec_dot_q2_0_q8_0(" not in src, "llama.cpp now has an x86 q2_0 kernel"
     open(path, "w").write(src + Q2_0)
 
@@ -299,7 +328,7 @@ def main():
     assert block.count(Q2_0_FALLBACK) == 1, "x86 q2_0 fallback changed upstream"
     open(path, "w").write(src[:x86] + block.replace(Q2_0_FALLBACK, "") + src[nxt:])
 
-    print(f"added SSSE3 kernels: {', '.join(KERNELS)}, iq4_nl_q8_0, q2_0_q8_0")
+    print(f"added SSSE3 kernels: {', '.join(KERNELS)}, iq4_nl_q8_0, q4_1_q8_1, q2_0_q8_0")
 
 
 if __name__ == "__main__":
