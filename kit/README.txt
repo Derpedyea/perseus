@@ -33,8 +33,21 @@ continues from where it stopped. If a test was cut off by a crash or power
 cut it is skipped, not retried; add --retry-failed to retry it.
 
 Disk use: models are copied in the background to /var/tmp/perseus-kit-local
-on the Mac's disk (up to ~32 GB), because USB 2.0 is too slow to load them
-from repeatedly. Delete them when you're completely done:
+on the Mac's disk, because USB 2.0 is too slow to load them from repeatedly:
+22.1 GB for the core kit, 39.5 GB for standard, plus ~0.3 GB of programs.
+Each copy starts only if the disk has the model's size + 5 GB free; otherwise
+that model runs straight from the USB (slow loads). Delete them when you're
+completely done:
        sudo bash run.sh clean
 
 USB format: must be exFAT or ext4. FAT32 can't hold files over 4 GB.
+
+DIAGNOSTICS-ONLY KIT (no models)
+--------------------------------
+A smaller kit that skips the models: it records the machine facts (CPU, RAM
+layout and speed, NUMA nodes), measures memory bandwidth, and checks and
+times our speed-up code on this CPU. Phases 1-2, about 10 minutes; start it
+the same way (sudo bash run.sh). The model tests show as 'absent'.
+It needs well under 1 GB, so any USB stick works, FAT32 included (the format
+most small sticks ship with). If the same stick later gets the models, just
+run the same command again; the model tests run then.

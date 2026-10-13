@@ -27,6 +27,16 @@ skip() { # reason
   exit $SKIP
 }
 
+# Ends the current step as absent: it needs a file this USB doesn't carry (a model on a diag or
+# smaller kit). Unlike skipped it is not final; every resume re-evaluates it, so a USB
+# re-assembled with a bigger tier runs it. A marker, not an exit code, so a benchmark's own
+# exit status can't be mistaken for it.
+absent() { # reason
+  echo "$1" > "$STEP_DIR/reason"
+  touch "$STEP_DIR/absent"
+  exit $SKIP
+}
+
 # Records a command in cmd.txt and runs it with a timeout when one is available.
 # Exit 124 means the timeout fired.
 run_cmd() { # timeout_seconds cmd args...
@@ -82,7 +92,8 @@ write_status() { # dir status rc started_epoch
 # A step that already finished ok/skipped is not rerun. A step that has a 'started'
 # marker but no status was killed mid-way (power loss, OOM, hard hang): it is marked
 # 'crashed' and not retried automatically, so one bad step can't wedge every rerun.
-# failed/timeout/crashed rerun only with --retry-failed; interrupted (Ctrl-C) always reruns.
+# failed/timeout/crashed rerun only with --retry-failed; interrupted (Ctrl-C) and absent (input
+# not on this USB) always rerun.
 run_step() {
   local id="$1"; shift
   local d="$RUN_DIR/steps/$id" prev=""
@@ -107,7 +118,7 @@ run_step() {
   local st=ok
   case "$rc" in
     0) st=ok ;;
-    "$SKIP") st=skipped ;;
+    "$SKIP") st=skipped; [ -f "$d/absent" ] && st=absent ;;
     124|137) st=timeout ;;
     130) st=interrupted ;;  # pause/stop/time budget while the step was waiting
     *) st=failed ;;
@@ -128,6 +139,8 @@ write_summary() {
     echo "perseus lab kit results: $(basename "$RUN_DIR")"
     echo "written $(ts)"
     echo
+    local n_absent; n_absent=$(grep -l '^absent$' "$RUN_DIR"/steps/*/status 2>/dev/null | wc -l)
+    [ "$n_absent" -gt 0 ] && echo "$n_absent tests need models this USB doesn't carry (status 'absent'); they run on the next 'bash run.sh' once the USB has them." && echo
     printf '%-46s %-11s %s\n' STEP STATUS NOTE
     for d in "$RUN_DIR"/steps/*/; do
       [ -d "$d" ] || continue

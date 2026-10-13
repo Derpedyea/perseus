@@ -13,6 +13,7 @@
 #   --new            start a fresh results folder instead of continuing
 #   --no-copy        run models straight off the USB (slow loads, no local disk use)
 # Troubleshooting: PERSEUS_VARIANT=penryn|nehalem|haswell forces the CPU build.
+# Tests only: PERSEUS_PAUSE_AFTER=STEP-ID pauses after that step, as 'run.sh pause' would.
 set -u
 
 KIT="$(cd "$(dirname "$0")" && pwd)"
@@ -184,10 +185,11 @@ case "$CMD" in
       [ -n "$P_TITLE" ] || return 0
       local extra=""
       [ "$P_SKIP" -gt 0 ] && extra=" ($P_SKIP skipped)"
+      [ "$P_ABS" -gt 0 ] && extra="$extra ($P_ABS need models not on this USB)"
       [ -n "$P_NOW" ] && extra="$extra  <- now: $P_NOW"
       printf '  %-42s %2d/%-2d done%s\n' "$P_TITLE" $((P_OK + P_SKIP + P_BAD)) "$P_TOTAL" "$extra"
     }
-    phase() { flush_phase; P_TITLE="$1. $2"; P_TOTAL=0 P_OK=0 P_SKIP=0 P_BAD=0 P_NOW=""; }
+    phase() { flush_phase; P_TITLE="$1. $2"; P_TOTAL=0 P_OK=0 P_SKIP=0 P_BAD=0 P_ABS=0 P_NOW=""; }
     S() {
       local d="$RUN_DIR/steps/$1" st=""
       P_TOTAL=$((P_TOTAL + 1))
@@ -195,6 +197,7 @@ case "$CMD" in
       case "$st" in
         ok) P_OK=$((P_OK + 1)) ;;
         skipped) P_SKIP=$((P_SKIP + 1)) ;;
+        absent) P_ABS=$((P_ABS + 1)) ;;
         failed|timeout|crashed) P_BAD=$((P_BAD + 1)); PROBLEMS="$PROBLEMS  $1: $st"$'\n' ;;
         '') if [ -f "$d/started" ] && owner_alive; then
               local age=$(( $(date +%s) - $(stat -c %Y "$d/started" 2>/dev/null || stat -f %m "$d/started") ))
@@ -304,12 +307,13 @@ setup_linux() {
     *) log "!! PERSEUS_VARIANT must be penryn, nehalem or haswell (got '$PERSEUS_VARIANT')"; exit 2 ;;
   esac
   # Prove the chosen build actually runs here; step down a level on SIGILL. A tiny real
-  # benchmark exercises the SIMD kernels; --help alone might never reach them.
-  local probe=(--help) tiny="$KIT/models/$TINY_Q40"
-  [ -f "$tiny" ] && probe=(-m "$tiny" -p 4 -n 2 -r 1 -t 2)
+  # benchmark exercises the SIMD kernels (--help alone might never reach them); without a model
+  # (diag kit) one trial of the kernel self-test does.
+  local tiny="$KIT/models/$TINY_Q40" rc
   while [ "$VARIANT" != none ]; do
-    "$BIN/stock/$VARIANT/llama-bench" "${probe[@]}" >/dev/null 2>&1
-    local rc=$?
+    if [ -f "$tiny" ]; then "$BIN/stock/$VARIANT/llama-bench" -m "$tiny" -p 4 -n 2 -r 1 -t 2 >/dev/null 2>&1
+    else "$BIN/stock/$VARIANT/test-ssse3-kernels" 1 >/dev/null 2>&1; fi
+    rc=$?
     [ "$rc" != 132 ] && [ "$rc" != 126 ] && break
     log "!! $VARIANT build won't run here (exit $rc), trying an older one"
     case "$VARIANT" in haswell) VARIANT=nehalem ;; nehalem) VARIANT=penryn ;; *) VARIANT=none ;; esac
@@ -354,19 +358,21 @@ prefetch_alive() { pid_alive "$(cat "$LOCAL/models/.prefetch.pid" 2>/dev/null)";
 
 start_prefetch() {
   [ "$OS" = Linux ] && [ "$NO_COPY" = 0 ] && [ "$VARIANT" != none ] || return 0
-  command -v setsid >/dev/null 2>&1 || { log "!! setsid missing: models will be copied in the foreground"; return 0; }
-  mkdir -p "$LOCAL/models"
   # A copier left over from a crashed run would race this one on the same .part files.
   local old; old=$(cat "$LOCAL/models/.prefetch.pid" 2>/dev/null)
   if pid_alive "$old"; then kill -TERM -- "-$old" 2>/dev/null; sleep 1; fi
-  # .bad/.nospace from an earlier day get a fresh attempt (disk may have been freed, a USB
-  # read error may have been transient); the copier re-marks them if they still fail.
-  rm -f "$LOCAL/models/"*.part "$LOCAL/models/"*.bad "$LOCAL/models/"*.nospace "$LOCAL/models/.prefetch.pid" "$LOCAL/models/.copying"
   local specs=() f i
   for f in $PREFETCH_ORDER; do
+    [ -f "$KIT/models/$f" ] || continue
     i=$(model_index "$f"); [ -n "$i" ] || continue
     specs[${#specs[@]}]="$f ${M_SIZE[$i]} ${M_SHA[$i]}"
   done
+  [ ${#specs[@]} -gt 0 ] || return 0  # diag kit: nothing to stage, nothing on the local disk
+  command -v setsid >/dev/null 2>&1 || { log "!! setsid missing: models will be copied in the foreground"; return 0; }
+  mkdir -p "$LOCAL/models"
+  # .bad/.nospace from an earlier day get a fresh attempt (disk may have been freed, a USB
+  # read error may have been transient); the copier re-marks them if they still fail.
+  rm -f "$LOCAL/models/"*.part "$LOCAL/models/"*.bad "$LOCAL/models/"*.nospace "$LOCAL/models/.prefetch.pid" "$LOCAL/models/.copying"
   local pri=(nice -n 19)
   command -v ionice >/dev/null 2>&1 && pri=(nice -n 19 ionice -c 3)
   setsid "${pri[@]}" bash "$KIT/lib/prefetch.sh" "$KIT" "$LOCAL/models" "$RUN_DIR/prefetch.log" ${specs[@]+"${specs[@]}"} </dev/null >/dev/null 2>&1 &
@@ -393,9 +399,12 @@ need_linux_llama() {
   [ "$VARIANT" != none ] || skip "no kit build runs on this CPU (needs at least SSSE3 + SSE4.1)"
 }
 
-need_model() { # file -> sets MI (catalog index) and MP (path), or skips
+# The USB decides which models a run uses: a local copy left by an earlier, bigger kit doesn't
+# count, so a diag kit never runs model tests.
+need_model() { # file -> sets MI (catalog index) and MP (path), or ends the step
   MI=$(model_index "$1"); [ -n "$MI" ] || skip "$1 is not in this kit's catalog"
-  MP=$(model_path "$1"); [ -n "$MP" ] || skip "model unavailable (not on this USB, or its copy failed the checksum)"
+  [ -f "$KIT/models/$1" ] || absent "$1 is not on this USB"
+  MP=$(model_path "$1"); [ -n "$MP" ] || skip "the copy of $1 failed its checksum"
 }
 
 # Records what else was going on, so a slow number can be explained later.
@@ -525,7 +534,7 @@ step_stage() { # file
   need_linux_llama
   local f="$1" i; i=$(model_index "$f")
   [ -n "$i" ] || skip "$f is not in this kit's catalog"
-  [ -f "$KIT/models/$f" ] || skip "not on this USB (smaller kit)"
+  [ -f "$KIT/models/$f" ] || absent "$f is not on this USB"
   [ "$NO_COPY" = 1 ] && skip "--no-copy: running from USB"
   local waited=0 dst="$LOCAL/models/$f"
   while :; do
@@ -625,13 +634,26 @@ step_bench_repack_off() { export PERSEUS_REPACK=0; step_bench "$@"; }
 
 # ---------- go ----------
 phase() { log "== Phase $1: $2 (~$3 min on the Mac Pro, rough)"; }
-S() { gate; run_step "$@"; }
+S() {
+  gate; run_step "$@"
+  if [ "$1" = "${PERSEUS_PAUSE_AFTER:-}" ]; then touch "$PAUSE_FLAG"; fi
+}
 
 log "perseus lab kit -> $RUN_DIR"
 log "CPU build: $VARIANT | NUMA nodes: $NODES | cores: $NPHYS (threads $NCPUS)${BUDGET_MIN:+ | stops starting tests after $BUDGET_MIN min}"
-log "Phases 1-5 are the important data (~80 min). Stop any time: Ctrl-C here, or 'bash run.sh pause' / 'bash run.sh stop' in another terminal."
+ON_USB=0
+for f in ${M_FILE[@]+"${M_FILE[@]}"}; do [ -f "$KIT/models/$f" ] && ON_USB=$((ON_USB + 1)); done
+if [ "$ON_USB" = 0 ]; then
+  log "Diagnostics kit: no models on this USB, so only phases 1-2 run (~10 min); model tests are marked 'absent'."
+else
+  log "Phases 1-5 are the important data (~80 min)."
+fi
+log "Stop any time: Ctrl-C here, or 'bash run.sh pause' / 'bash run.sh stop' in another terminal."
 start_prefetch
 plan
 write_summary
 touch "$RUN_DIR/FINISHED"
-log "DONE. Results: $RUN_DIR (summary.txt has the headline numbers). Eject the USB and bring it back."
+n_absent=$(grep -l '^absent$' "$RUN_DIR"/steps/*/status 2>/dev/null | wc -l | tr -d ' ')
+absent_note=""
+[ "$n_absent" -gt 0 ] && absent_note=" ($n_absent tests need models this USB doesn't carry)"
+log "DONE$absent_note. Results: $RUN_DIR (summary.txt has the headline numbers). Eject the USB and bring it back."

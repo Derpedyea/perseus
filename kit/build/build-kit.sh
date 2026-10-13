@@ -5,8 +5,10 @@
 #   build-kit.sh src                 clone/refresh llama.cpp (stock) + PrismML fork (prism branch)
 #   build-kit.sh binaries            static, old-CPU-safe binaries for every fork x ISA variant (Docker)
 #   build-kit.sh test                run the binaries under QEMU as Penryn/Nehalem CPUs, incl. negative controls
-#   build-kit.sh models [TIER]       download + sha256-verify models up to TIER (core|standard), resumable
+#   build-kit.sh models [TIER]       download + sha256-verify models up to TIER (diag|core|standard), resumable
 #   build-kit.sh assemble DEST [TIER]  write DEST/PERSEUS-KIT (scripts, binaries, models, MANIFEST.json)
+# Tiers: diag = no models (machine facts, memory bandwidth, kernel checks; FAT32 is fine),
+#        core = + the compact 27Bs (22.1 GB of models), standard = + Qwen3.8-27B Q4_0 and its MTP head (39.5 GB).
 set -euo pipefail
 
 KIT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,7 +22,7 @@ TARGETS="llama-bench llama-completion llama-speculative-simple llama-cli"
 die() { echo "build-kit: $*" >&2; exit 1; }
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 
-tier_rank() { case "$1" in core) echo 1 ;; standard) echo 2 ;; *) die "unknown tier '$1' (core|standard)" ;; esac; }
+tier_rank() { case "$1" in diag) echo 0 ;; core) echo 1 ;; standard) echo 2 ;; *) die "unknown tier '$1' (diag|core|standard)" ;; esac; }
 
 # Emits "tier runner file size sha url" rows at or below TIER.
 model_rows() {
@@ -168,6 +170,7 @@ cmd_test() {
 
 cmd_models() {
   local tier="${1:-standard}"
+  [ "$(tier_rank "$tier")" -gt 0 ] || { log "tier $tier carries no models: nothing to download"; return 0; }
   mkdir -p "$WORK/models"
   local failed=0
   while IFS=$'\t' read -r _tier _runner file size sha url; do
@@ -189,20 +192,26 @@ cmd_models() {
 
 cmd_assemble() {
   local dest="${1:-}" tier="${2:-standard}"
-  [ -n "$dest" ] && [ -d "$dest" ] || die "usage: $0 assemble DEST_DIR [core|standard] (DEST must exist, e.g. the mounted USB)"
+  [ -n "$dest" ] && [ -d "$dest" ] || die "usage: $0 assemble DEST_DIR [diag|core|standard] (DEST must exist, e.g. the mounted USB)"
+  tier_rank "$tier" >/dev/null
+  [ -d "$WORK/bin/stock" ] || die "no binaries in $WORK/bin; run '$0 binaries'"
   local out="$dest/PERSEUS-KIT"
   local need=0
   while IFS=$'\t' read -r _t _r file size _s _u; do
     [ -f "$WORK/models/$file.sha256ok" ] || die "model $file missing or unverified; run '$0 models $tier'"
     need=$((need + size))
   done < <(model_rows "$tier")
-  need=$((need + 1500000000))  # binaries + room for results
+  # + binaries + results: run.sh refuses to start with under 200 MB free; a full run's results are a few MB
+  need=$((need + $(du -sb "$WORK/bin" | cut -f1) + 300000000))
   local fs; fs=$(stat -f -c %T "$dest")
-  case "$fs" in msdos|vfat|fat) die "$dest is FAT ($fs): files over 4 GB won't fit. Format the USB as exFAT or ext4." ;; esac
+  # FAT32 can't hold files over 4 GB (every model tier has some). The diag kit has none, and
+  # nothing executes from the USB (run.sh copies bin/ to the local disk and chmods it there), so
+  # udisks' vfat default 'showexec' (no +x on extensionless files) doesn't matter: kit/test/e2e-diag.sh.
+  case "$fs" in msdos|vfat|fat) [ "$tier" = diag ] || die "$dest is FAT ($fs): files over 4 GB won't fit. Format the USB as exFAT or ext4 (or assemble the diag tier)." ;; esac
   local free; free=$(( $(stat -f -c '%a * %S' "$dest") ))
-  [ "$free" -ge "$need" ] || die "$dest has $((free / 1000000000)) GB free, kit needs $((need / 1000000000)) GB"
+  [ "$free" -ge "$need" ] || die "$dest has $((free / 1000000)) MB free, kit needs $((need / 1000000)) MB"
 
-  log "writing $out ($((need / 1000000000)) GB, tier $tier, fs $fs)"
+  log "writing $out ($((need / 1000000)) MB, tier $tier, fs $fs)"
   mkdir -p "$out/models" "$out/bin" "$out/lib" "$out/src"
   cp "$KIT/run.sh" "$KIT/README.txt" "$KIT/models.tsv" "$out/"
   cp "$KIT/lib/"*.sh "$out/lib/"
@@ -213,6 +222,8 @@ cmd_assemble() {
     log "copy  $file"
     cp "$WORK/models/$file" "$out/models/$file.part" && mv "$out/models/$file.part" "$out/models/$file"
   done < <(model_rows "$tier")
+  local extra; extra=$(comm -23 <(ls "$out/models" | grep -v '\.part$' | sort) <(model_rows "$tier" | cut -f3 | sort) | tr '\n' ' ')
+  [ -z "$extra" ] || log "note: $out/models also holds $extra(left in place from an earlier, bigger kit; run.sh uses them)"
   {
     printf '{\n  "built_at": "%s",\n  "tier": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tier"
     printf '  "stock_commit": "%s",\n' "$(git -C "$WORK/src/llama.cpp-stock" rev-parse HEAD)"
@@ -234,5 +245,5 @@ case "${1:-}" in
   test) cmd_test ;;
   models) cmd_models "${2:-standard}" ;;
   assemble) shift; cmd_assemble "$@" ;;
-  *) sed -n '2,10p' "$0"; exit 2 ;;
+  *) sed -n '2,12p' "$0"; exit 2 ;;
 esac

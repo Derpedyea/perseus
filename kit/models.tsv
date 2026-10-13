@@ -1,5 +1,5 @@
 # Models the kit can carry. Which tests use which model is the plan in run.sh.
-# tier: core (~23 GB on the USB) < standard (~41 GB). build-kit.sh copies every row at or below the chosen tier.
+# tier: diag (no models, ~0.3 GB on the USB) < core (~23 GB) < standard (~41 GB). build-kit.sh copies every row at or below the chosen tier.
 # runner: which llama.cpp build loads it (prism = PrismML fork, needed for PQ2_0/PTQ1_0).
 #tier	runner	file	size	sha256	url
 core	stock	Qwen3.5-0.8B-Q4_0.gguf	507154688	444406ddd926550c724ec18d5120a9d40ded44908a063b0e66e9a7e5464c652c	https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_0.gguf
