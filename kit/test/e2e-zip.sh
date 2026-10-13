@@ -27,6 +27,10 @@ expect "no symlinks" 0 "$(unzip -Zl "$ZIP" | grep -c '^l')"
 
 mkdir -p "$T/x" && (cd "$T/x" && unzip -q "$ZIP")
 P=/x/PERSEUS-KIT
+# read the plan now: after chmod -R a-x only root (the container) can enter these directories
+models=$(sed -n 's/^  S \([^ ]*\) step_\(stage\|sanity\|bench\|mtp\|mtp_mc_off\|bench_tiled_off\|bench_repack_off\) .*/\1/p' "$T/x/PERSEUS-KIT/run.sh")
+diag=$(sed -n 's/^  S \([12]-[^ ]*\) .*/\1/p' "$T/x/PERSEUS-KIT/run.sh" | grep -vxF -f <(echo "$models"))
+expect "plan read (phase 1-2 diagnostic steps)" yes "$([ "$(echo "$diag" | wc -w)" -ge 10 ] && echo yes || echo "no: $diag")"
 docker rm -f "$C" >/dev/null 2>&1
 docker run -d --init --memory=10g --memory-swap=10g -e PERSEUS_VARIANT=nehalem --name "$C" --network none \
   -v "$T/x:/x" perseus-kit-build:bookworm sleep infinity >/dev/null
@@ -36,8 +40,6 @@ inside "cd $P && bash run.sh > /tmp/run.out 2>&1; echo \$? > /tmp/run.rc"
 expect "run exits 0" 0 "$(inside 'cat /tmp/run.rc')"
 expect "DONE reached" 1 "$(inside "grep -c 'DONE (' /tmp/run.out")"
 RD=$(inside "ls -d $P/results/*/ | tail -1")
-models=$(sed -n 's/^  S \([^ ]*\) step_\(stage\|sanity\|bench\|mtp\|mtp_mc_off\|bench_tiled_off\|bench_repack_off\) .*/\1/p' "$T/x/PERSEUS-KIT/run.sh")
-diag=$(sed -n 's/^  S \([12]-[^ ]*\) .*/\1/p' "$T/x/PERSEUS-KIT/run.sh" | grep -vxF -f <(echo "$models"))
 res=$(for s in $diag; do echo "$s $(inside "cat $RD/steps/$s/status 2>/dev/null || echo none")"; done)
 expect "phase 1-2 diagnostics ok (multi-node membw skipped on 1 node)" "" \
   "$(echo "$res" | grep -v ' ok$' | grep -v -E '^1-0[6-9]-.* skipped$' | tr '\n' ' ')"

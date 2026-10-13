@@ -79,7 +79,7 @@ has "status: finished" "state: finished" "$s"
 has "status counts the absent steps" "need models not on this USB" "$s"
 sum=$(cat "$(RD "$K")summary.txt")
 has "summary says how many need models" "tests need models this USB doesn't carry" "$sum"
-expect "summary lists every step" "$n_plan" "$(for s in $(plan_ids "$K"); do echo "$sum" | grep -q "^$s " && echo "$s"; done | wc -l)"
+expect "summary lists every step" "$n_plan" "$(for s in $(plan_ids "$K"); do grep -q "^$s " <<<"$sum" && echo "$s"; done | wc -l)"
 docker rm -f "$C" >/dev/null
 
 # ---------- (b) ----------
