@@ -377,6 +377,9 @@ start_prefetch() {
   command -v ionice >/dev/null 2>&1 && pri=(nice -n 19 ionice -c 3)
   setsid "${pri[@]}" bash "$KIT/lib/prefetch.sh" "$KIT" "$LOCAL/models" "$RUN_DIR/prefetch.log" ${specs[@]+"${specs[@]}"} </dev/null >/dev/null 2>&1 &
   PREFETCH_PID=$!
+  # Registered here too, not only by the copier: at idle priority it can start seconds later, and
+  # a stage step that saw no copier would copy the same file into the same .part beside it.
+  echo "$PREFETCH_PID" > "$LOCAL/models/.prefetch.pid"
 }
 
 mem_avail_kb() { awk '/^MemAvailable:/ {print $2}' /proc/meminfo; }

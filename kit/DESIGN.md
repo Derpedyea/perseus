@@ -16,7 +16,7 @@
 | paused (`run.sh pause`) | flag file; the runner finishes the current test, then stops cleanly (exit 0, summary written); a stage step waiting on the copier ends `interrupted` and reruns | e2e: pause mid-bench |
 | stopped (`run.sh stop`) | SIGINT to the runner's process group (recorded in the lock) = Ctrl-C | e2e |
 | time limit (`--for N`) | no new test starts after N minutes (uptime clock, immune to a wrong wall clock); the running one finishes | e2e with `--for 1` |
-| background copy | copier in its own session at idle CPU/IO priority, copies in plan order, sha256 → `.ok`/`.bad`/`.nospace`; killed with the runner; a copier orphaned by a crash is killed on the next start and its `.part` removed; each bench records whether a copy was running (`env.txt`) | e2e: copy mode, stop mid-copy, kill -9 mid-copy |
+| background copy | copier in its own session at idle CPU/IO priority (the runner records its pid before any step runs, so a stage step never copies alongside a copier that hasn't started yet), copies in plan order, sha256 → `.ok`/`.bad`/`.nospace`; killed with the runner; a copier orphaned by a crash is killed on the next start and its `.part` removed; each bench records whether a copy was running (`env.txt`) | e2e: copy mode, stop mid-copy, kill -9 mid-copy; e2e-diag (b): copier delayed 3 s at start, the resumed run's first stage step waits for it |
 | reordered | steps have fixed ids; resume keys on the id, not position | by construction |
 | USB moved to another machine | lock owner host differs → treated as stale; results dir is per host | by construction |
 | identity change (sudo vs not) | local cache path fixed (`/var/tmp`), not `$HOME` | by construction |

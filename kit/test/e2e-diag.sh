@@ -98,9 +98,16 @@ expect "tiny-model steps absent before" "absent absent absent absent absent" "$(
 expect "re-assemble with core exits 0" 0 "$?"
 expect "MANIFEST tier after re-assemble" core "$(sed -n 's/.*"tier": "\([a-z]*\)".*/\1/p' "$K/MANIFEST.json")"
 
-kit_run "PERSEUS_PAUSE_AFTER=$LAST_TINY"
+# The resume's first step is a stage step, right after the copier is launched. A shim delays the
+# copier's start by 3 s (as idle priority under load can): the step must wait for it, not copy
+# the same file alongside it.
+inside "mkdir -p /tmp/shim && printf '#!/bin/sh\nsleep 3\nexec /usr/bin/ionice \"\$@\"\n' > /tmp/shim/ionice && chmod +x /tmp/shim/ionice"
+kit_run 'PATH=/tmp/shim:$PATH' "PERSEUS_PAUSE_AFTER=$LAST_TINY"
 expect "resumed run paused again" 2 "$(inside "grep -c 'Paused. Results so far are saved' /tmp/run.out")"
-expect "tiny-model steps ran after resume" "ok ok ok ok ok" "$(for s in $TINY; do st "$K" "$s"; done | tr '\n' ' ' | sed 's/ $//')"
+res=$(for s in $TINY; do st "$K" "$s"; done | tr '\n' ' ' | sed 's/ $//')
+expect "tiny-model steps ran after resume" "ok ok ok ok ok" "$res"
+[ "$res" = "ok ok ok ok ok" ] || for s in $TINY; do echo "      $s: $(tail -3 "$(RD "$K")steps/$s/stderr.txt" 2>/dev/null | tr '\n' '|')"; done
+has "first stage step waited for the slow-starting copier" "for the background copy" "$(cat "$(RD "$K")steps/2-01-tiny-q4_0-stage/stdout.txt" 2>/dev/null)"
 expect "same results folder" 1 "$(ls -d "$K"/results/*/ | wc -l)"
 expect "finished steps not rerun" 1 "$(grep -c '>> 1-01-env' "$(RD "$K")run.log")"
 expect "status no longer counts phase 2 as absent" "" "$(inside "cd '$P' && bash run.sh status" | grep '^  2\. ' | grep -o 'need models not on this USB')"
