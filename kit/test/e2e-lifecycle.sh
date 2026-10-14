@@ -26,7 +26,7 @@ INIT=--init; [ "${E2E_NO_INIT:-0}" = 1 ] && INIT=""
 docker run -d $INIT --memory=10g --memory-swap=10g -e PERSEUS_VARIANT=nehalem --name "$C" --network none -u "$(id -u):$(id -g)" -v "$K:$P" perseus-kit-build:bookworm sleep infinity >/dev/null
 inside "rm -rf '$P'/results/* '$P'/results/.lock"
 
-BONSAI=3-03-bonsai-pq2-all-sockets
+BONSAI=5-03-bonsai-pq2-all-sockets
 start_probe() { docker exec -d "$C" bash -c "exec setsid sleep 31"; sleep 1; }
 start_probe
 expect "harness: SIGINT not ignored in started process" 0 "$(inside "printf '%d' \$(( 0x\$(grep SigIgn /proc/\$(pgrep -f '^sleep 31' | head -1)/status | awk '{print \$2}') & 2 ))")"
@@ -64,7 +64,7 @@ start_run --no-copy
 wait_for "[ -f \"\$(ls -d '$P'/results/*/ | tail -1)/steps/$BONSAI/status\" ]" 60 || bad "no status after crash"
 expect "kill -9 mid-step -> crashed" crashed "$(st $BONSAI)"
 expect "stale lock taken over" yes "$(inside "grep -q 'was cut off' /tmp/run.out && echo yes || echo no")"
-wait_for "ls '$P'/results/*/steps/5-02-bonsai-pq2-mtp-off/started" 900 || bad "did not move on past the crashed step"
+wait_for "ls '$P'/results/*/steps/7-02-bonsai-pq2-mtp-off/started" 900 || bad "did not move on past the crashed step"
 expect "crashed step not retried" crashed "$(st $BONSAI)"
 inside "p=\$(pgrep -f '^bash run.sh' | head -1); [ -n \"\$p\" ] && kill -INT -\$p"; wait_for "! pgrep -f '^bash run.sh'" 120
 

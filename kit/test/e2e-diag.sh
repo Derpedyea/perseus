@@ -34,7 +34,7 @@ RD() { ls -d "$1"/results/*/ | tail -1; }
 st() { cat "$(RD "$1")steps/$2/status" 2>/dev/null || echo none; }
 # step ids of the plan, and the ones whose function needs a model file
 plan_ids() { sed -n 's/^  S \([^ ]*\) .*/\1/p' "$1/run.sh"; }
-model_ids() { sed -n 's/^  S \([^ ]*\) step_\(stage\|sanity\|bench\|mtp\|mtp_mc_off\|bench_tiled_off\|bench_repack_off\) .*/\1/p' "$1/run.sh"; }
+model_ids() { sed -n 's/^  S \([^ ]*\) step_\(stage\|sanity\|bench\|mtp\|mtp_mc_off\|bench_tiled_off\|bench_repack_off\|gpu_sanity\|gpu_bench\|flashnext\) .*/\1/p' "$1/run.sh"; }
 cleanup() { docker rm -f "perseus-e2e-diag-a-$TAG" "perseus-e2e-diag-b-$TAG" >/dev/null 2>&1; rm -rf "$T"; }
 trap cleanup EXIT
 
@@ -72,6 +72,10 @@ expect "every planned step has an outcome" "$n_plan" "$(ls "$(RD "$K")"steps/*/s
 expect "every model step absent" "" "$(for s in $(model_ids "$K"); do [ "$(st "$K" "$s")" = absent ] || echo "$s=$(st "$K" "$s")"; done | tr '\n' ' ')"
 expect "other steps ok or skipped" "" "$(for s in $(plan_ids "$K" | grep -vxF -f <(model_ids "$K")); do case "$(st "$K" "$s")" in ok|skipped) ;; *) echo "$s=$(st "$K" "$s")" ;; esac; done | tr '\n' ' ')"
 expect "Flash-Next kernel checks ran" "ok ok" "$(st "$K" 2-00f-flashnext-kernel-selftest) $(st "$K" 2-00g-flashnext-kernel-bench)"
+# Debian 12's glibc (2.36) is older than the Vulkan build's (Ubuntu 24.04): GPU steps skip, saying why
+expect "GPU probe skipped on an older glibc" skipped "$(st "$K" 3-01-gpu-probe)"
+has "GPU probe says which glibc" "needs glibc 2.38 or newer; this box has 2.36" "$(cat "$(RD "$K")steps/3-01-gpu-probe/reason" 2>/dev/null)"
+expect "GPU op list steps skipped too" "skipped skipped" "$(st "$K" 3-02-gpu-selftest) $(st "$K" 3-03-gpu-op-bench)"
 expect "local dir holds only bin/" ".perseus-kit bin" "$(ls -A "$LD" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
 expect "no background copier started" absent "$([ -f "$(RD "$K")prefetch.log" ] && echo present || echo absent)"
 s=$(inside "cd '$P' && bash run.sh status")
@@ -111,6 +115,24 @@ has "first stage step waited for the slow-starting copier" "for the background c
 expect "same results folder" 1 "$(ls -d "$K"/results/*/ | wc -l)"
 expect "finished steps not rerun" 1 "$(grep -c '>> 1-01-env' "$(RD "$K")run.log")"
 expect "status no longer counts phase 2 as absent" "" "$(inside "cd '$P' && bash run.sh status" | grep '^  2\. ' | grep -o 'need models not on this USB')"
+
+# ---------- (c) a split model only partly downloaded ----------
+# Flash-Next is two files; with only the first verified, assemble must leave its GPU op list out
+# (llama.cpp can't open half a split model), not fail: a diag or core kit doesn't need it.
+FN1=Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf TINY=Qwen3.5-0.8B-Q4_0.gguf
+if [ -f "$W/models/$FN1.sha256ok" ] && [ -f "$W/models/$TINY.sha256ok" ]; then
+  PW="$T/partwork"; mkdir -p "$PW/models" "$PW/build/stock-vk-nehalem/bin" "$PW/src/llama.cpp-stock/ggml/include" "$T/stick-c"
+  cp -a --reflink=auto "$W/bin" "$PW/bin"
+  cp --reflink=auto "$W/build/stock-vk-nehalem/bin/test-export-graph-ops" "$PW/build/stock-vk-nehalem/bin/"
+  cp "$W/src/llama.cpp-stock/ggml/include/ggml.h" "$PW/src/llama.cpp-stock/ggml/include/"
+  for f in "$FN1" "$TINY"; do ln "$W/models/$f" "$PW/models/$f" && touch "$PW/models/$f.sha256ok"; done
+  PERSEUS_KIT_WORK="$PW" "$BK" assemble "$T/stick-c" diag > "$T/assemble-c.out" 2>&1
+  expect "(c) assemble with half of Flash-Next exits 0" 0 "$?"
+  expect "(c) only the tiny model's op list" "Qwen3.5-0.8B-Q4_0.txt" "$(ls "$T/stick-c/PERSEUS-KIT/gpu-ops" 2>/dev/null | grep -v builtin | tr '\n' ' ' | sed 's/ $//')"
+  has "(c) says why Flash-Next's is missing" "or a file split from it) not downloaded" "$(cat "$T/assemble-c.out")"
+else
+  echo "SKIP  (c): needs $FN1 and $TINY in $W/models (build-kit.sh models full)"
+fi
 
 echo "passed $pass, failed $fail"
 [ "$fail" -eq 0 ]

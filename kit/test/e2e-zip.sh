@@ -2,8 +2,9 @@
 # The diag kit zip (build-kit.sh zip) works however it was extracted: unzip -t passes, the zip
 # holds exactly one PERSEUS-KIT/ (MANIFEST.json, no results/, no models), and after extracting it
 # and stripping every exec bit (chmod -R a-x, as FAT32/exFAT/NTFS round trips may) 'bash run.sh'
-# reaches DONE with the phase 1-2 diagnostics done. Runs as root, like 'sudo bash run.sh' in the
-# lab (root can still enter directories without x).
+# reaches DONE with the phase 1-2 diagnostics done (phase 3 skips: Debian 12's glibc predates
+# the Vulkan build's). Runs as root, like 'sudo bash run.sh' in the lab (root can still enter
+# directories without x).
 # usage: e2e-zip.sh KIT.zip
 set -uo pipefail
 ZIP="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"

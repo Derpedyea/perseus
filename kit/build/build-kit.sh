@@ -3,27 +3,34 @@
 # (default ~/.cache/perseus-kit), never in the repo.
 #
 #   build-kit.sh src                 clone/refresh llama.cpp (stock) + PrismML fork (prism branch)
-#   build-kit.sh binaries            static, old-CPU-safe binaries for every fork x ISA variant (Docker)
+#   build-kit.sh binaries            static, old-CPU-safe binaries for every fork x ISA variant (Docker),
+#                                    plus a Vulkan build (nehalem) for the lab's GPU
 #   build-kit.sh test                run the binaries under QEMU as Penryn/Nehalem CPUs, incl. negative controls
-#   build-kit.sh models [TIER]       download + sha256-verify models up to TIER (diag|core|standard), resumable
-#   build-kit.sh assemble DEST [TIER]  write DEST/PERSEUS-KIT (scripts, binaries, models, MANIFEST.json)
+#   build-kit.sh models [TIER]       download + sha256-verify models up to TIER (diag|core|standard|full), resumable
+#   build-kit.sh assemble DEST [TIER]  write DEST/PERSEUS-KIT (scripts, binaries, GPU op lists, models, MANIFEST.json)
 #   build-kit.sh zip OUT.zip         the diag kit (assemble ... diag) as one zip: PERSEUS-KIT/ at the top
-# Tiers: diag = no models (machine facts, memory bandwidth, kernel checks; FAT32 is fine),
-#        core = + the compact 27Bs (22.1 GB of models), standard = + Qwen3.8-27B Q4_0 and its MTP head (39.5 GB).
+# Tiers: diag = no models (machine facts, memory bandwidth, CPU kernel + GPU checks; FAT32 is fine),
+#        core = + the compact 27Bs (22.1 GB of models), standard = + Qwen3.8-27B Q4_0 and its MTP head (39.5 GB),
+#        full = + Qwen3.8-Flash-Next IQ3_XXS (115.3 GB).
 set -euo pipefail
 
 KIT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KERNELS="$(cd "$KIT/../kernels" && pwd)"
 WORK="${PERSEUS_KIT_WORK:-$HOME/.cache/perseus-kit}"
 IMAGE=perseus-kit-build:bookworm
+IMAGE_VK=perseus-kit-build-vk:noble
 FORKS="stock prism"
 VARIANTS="penryn nehalem haswell"
 TARGETS="llama-bench llama-completion llama-speculative-simple llama-cli"
+# The Vulkan build ships these; test-export-graph-ops stays here (it writes the GPU op lists).
+VK_TARGETS="llama-bench llama-completion test-backend-ops"
+# Models whose graphs the GPU self-test (step 3-02) replays: what the lab runs on the GPU.
+GPU_OP_MODELS="Qwen3.5-0.8B-Q4_0.gguf Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf"
 
 die() { echo "build-kit: $*" >&2; exit 1; }
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 
-tier_rank() { case "$1" in diag) echo 0 ;; core) echo 1 ;; standard) echo 2 ;; *) die "unknown tier '$1' (diag|core|standard)" ;; esac; }
+tier_rank() { case "$1" in diag) echo 0 ;; core) echo 1 ;; standard) echo 2 ;; full) echo 3 ;; *) die "unknown tier '$1' (diag|core|standard|full)" ;; esac; }
 
 # Emits "tier runner file size sha url" rows at or below TIER.
 model_rows() {
@@ -35,9 +42,10 @@ model_rows() {
 }
 
 # Memory-capped (no swap) so a runaway test can't push the host into swap.
-in_docker() {
-  docker run --rm --memory=10g --memory-swap=10g -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$WORK:/work" -v "$KIT:/kit:ro" "$IMAGE" bash -euo pipefail -c "$1"
+in_image() { # image script
+  docker run --rm --memory=12g --memory-swap=12g -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$WORK:/work" -v "$KIT:/kit:ro" "$1" bash -euo pipefail -c "$2"
 }
+in_docker() { in_image "$IMAGE" "$1"; }
 
 cmd_src() {
   mkdir -p "$WORK/src"
@@ -101,6 +109,7 @@ cmd_binaries() {
       "
     done
   done
+  build_vulkan
   log "kernel self-test (SSSE3 kernels vs llama.cpp's generic reference)"
   "$KERNELS/build-test.sh" $VARIANTS
   for v in $VARIANTS; do
@@ -113,10 +122,76 @@ cmd_binaries() {
   log "binaries in $WORK/bin"
 }
 
+# The lab's GPU (AMD RX 580) through llama.cpp's Vulkan backend, with the same perseus CPU patches
+# (routed experts run on the CPU). Built on Ubuntu 24.04, the lab's OS: Vulkan's loader is
+# dlopen-based, so glibc is linked dynamically (2.39, the lab's version); libstdc++ is static.
+# The Khronos loader ships next to the binaries (rpath $ORIGIN/lib), so a box without libvulkan1
+# still starts them; the GPU driver itself (Mesa's RADV) must be on the box. glibc-min records the
+# newest glibc symbol version they use: run.sh skips the GPU steps on a box with an older glibc.
+build_vulkan() {
+  log "llama.cpp stock / nehalem + Vulkan"
+  docker build -q -t "$IMAGE_VK" "$KIT/build/vulkan" >/dev/null
+  in_image "$IMAGE_VK" "
+    cmake -S /work/src/llama.cpp-stock -B /work/build/stock-vk-nehalem -DCMAKE_BUILD_TYPE=Release \
+      -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_BACKEND_DL=OFF -DGGML_OPENMP=OFF -DGGML_VULKAN=ON \
+      -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_TESTS=ON -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF \
+      '-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc' -DCMAKE_C_FLAGS='$(march_flags nehalem)' -DCMAKE_CXX_FLAGS='$(march_flags nehalem)' \
+      $(isa_flags nehalem) > /work/build/stock-vk-nehalem.configure.log 2>&1 || { tail -30 /work/build/stock-vk-nehalem.configure.log; exit 1; }
+    cmake --build /work/build/stock-vk-nehalem -j\$(nproc) --target $VK_TARGETS test-export-graph-ops > /work/build/stock-vk-nehalem.build.log 2>&1 || { tail -40 /work/build/stock-vk-nehalem.build.log; exit 1; }
+    d=/work/bin/stock-vk/nehalem
+    rm -rf \$d && mkdir -p \$d/lib
+    for t in $VK_TARGETS; do
+      cp /work/build/stock-vk-nehalem/bin/\$t \$d/ && strip \$d/\$t && patchelf --set-rpath '\$ORIGIN/lib' \$d/\$t
+      need=\$(objdump -p \$d/\$t | awk '/NEEDED/ {print \$2}' | sort | tr '\n' ' ')
+      [ \"\$need\" = 'ld-linux-x86-64.so.2 libc.so.6 libm.so.6 libvulkan.so.1 ' ] || { echo \"\$t needs: \$need\"; exit 1; }
+    done
+    cp -L /usr/lib/x86_64-linux-gnu/libvulkan.so.1 \$d/lib/
+    for f in $VK_TARGETS lib/libvulkan.so.1; do objdump -T \$d/\$f; done | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1 > \$d/glibc-min
+    grep -qE '^2\\.[0-9]+\$' \$d/glibc-min || { echo \"can't read the glibc version the Vulkan build needs\"; exit 1; }
+  "
+}
+
+# True if FILE and, for a split model (NAME-00001-of-0000N.gguf), every one of its N parts are
+# downloaded and verified: llama.cpp opens them all, even for metadata.
+model_downloaded() { # file
+  local f="$1" n k
+  case "$f" in
+    *-00001-of-[0-9][0-9][0-9][0-9][0-9].gguf)
+      n=${f%.gguf}; n=$((10#${n##*-of-}))
+      for k in $(seq 1 "$n"); do
+        [ -f "$WORK/models/$(printf '%s-%05d-of-%05d.gguf' "${f%-00001-of-*}" "$k" "$n").sha256ok" ] || return 1
+      done ;;
+    *) [ -f "$WORK/models/$f.sha256ok" ] ;;
+  esac
+}
+
+# Op lists for the GPU self-test (step 3-02): every op the model's prompt (32-token batches) and
+# decode graphs run, with shapes and types, from llama.cpp's test-export-graph-ops (it reads the
+# model's metadata only, no weights). The lab replays them on its GPU against its CPU with
+# test-backend-ops --test-file. kit/build/gpu_ops.py leaves out the ops the replay can't judge.
+# Writes straight into the kit being assembled; scratch names carry this process's pid, so
+# assembles running side by side (the e2e suites) don't share files.
+gpu_ops_into() { # dest_dir
+  [ -x "$WORK/build/stock-vk-nehalem/bin/test-export-graph-ops" ] || die "no Vulkan build; run '$0 binaries'"
+  rm -rf "$1" && mkdir -p "$1"
+  local f raw="ops-raw.$$.txt"
+  for f in $GPU_OP_MODELS; do
+    if ! model_downloaded "$f"; then log "gpu-ops: $f (or a file split from it) not downloaded, the GPU self-test won't cover it"; continue; fi
+    in_image "$IMAGE_VK" "/work/build/stock-vk-nehalem/bin/test-export-graph-ops -m /work/models/$f -c 4096 -ub 32 -o /work/build/$raw > /work/build/$raw.log 2>&1 || { tail -20 /work/build/$raw.log; exit 1; }"
+    python3 -I "$KIT/build/gpu_ops.py" "$WORK/src/llama.cpp-stock/ggml/include/ggml.h" "$WORK/build/$raw" "$1/${f%.gguf}.txt" || die "gpu_ops.py failed on $f"
+    rm -f "$WORK/build/$raw" "$WORK/build/$raw.log"
+  done
+}
+
 # Runs one binary under an emulated CPU; prints the exit code. 132 = SIGILL.
 qemu_exit() { # cpu binary args...
   local cpu="$1"; shift
   in_docker "qemu-x86_64 -cpu $cpu $* >/dev/null 2>&1 && echo 0 || echo \$?" | tail -1
+}
+# Same, in the Vulkan build's image (its binaries need Ubuntu 24.04's glibc).
+qemu_exit_vk() { # cpu binary args...
+  local cpu="$1"; shift
+  in_image "$IMAGE_VK" "qemu-x86_64 -cpu $cpu $* >/dev/null 2>&1 && echo 0 || echo \$?" | tail -1
 }
 
 cmd_test() {
@@ -165,6 +240,9 @@ cmd_test() {
     check "prism $build PTQ1_0 bench on $cpu" 0 "$(qemu_exit "$cpu" /work/bin/prism/$build/llama-bench $(bench Ternary-Bonsai-2-27B-PTQ1_0))"
     check "stock $build Saluki IQ-mix bench on $cpu" 0 "$(qemu_exit "$cpu" /work/bin/stock/$build/llama-bench $(bench Underdog-Saluki-27B-1.0-IQ2-mix))"
   done
+  # 4) The Vulkan build's CPU code (its own toolchain) on the lab's CPU generation; no GPU here,
+  # so -dev none: every op runs on the CPU, perseus kernels included.
+  check "Vulkan build, CPU only, on Nehalem" 0 "$(qemu_exit_vk Nehalem /work/bin/stock-vk/nehalem/llama-completion -m /work/models/Qwen3.5-0.8B-Q4_0.gguf -dev none -p hello -n 4 --temp 0 -no-cnv -t 4)"
   [ "$fails" -eq 0 ] || die "$fails QEMU check(s) failed"
   log "all QEMU checks passed"
 }
@@ -193,7 +271,7 @@ cmd_models() {
 
 cmd_assemble() {
   local dest="${1:-}" tier="${2:-standard}"
-  [ -n "$dest" ] && [ -d "$dest" ] || die "usage: $0 assemble DEST_DIR [diag|core|standard] (DEST must exist, e.g. the mounted USB)"
+  [ -n "$dest" ] && [ -d "$dest" ] || die "usage: $0 assemble DEST_DIR [diag|core|standard|full] (DEST must exist, e.g. the mounted USB)"
   tier_rank "$tier" >/dev/null
   [ -d "$WORK/bin/stock" ] || die "no binaries in $WORK/bin; run '$0 binaries'"
   local out="$dest/PERSEUS-KIT"
@@ -218,6 +296,7 @@ cmd_assemble() {
   cp "$KIT/lib/"*.sh "$out/lib/"
   cp "$KIT/src/membw.c" "$out/src/"
   cp -r "$WORK/bin/." "$out/bin/"
+  gpu_ops_into "$out/gpu-ops"
   while IFS=$'\t' read -r _t _r file size _s _u; do
     if [ -f "$out/models/$file" ] && [ "$(stat -c %s "$out/models/$file")" = "$size" ]; then log "have  $file"; continue; fi
     log "copy  $file"
@@ -262,5 +341,5 @@ case "${1:-}" in
   models) cmd_models "${2:-standard}" ;;
   assemble) shift; cmd_assemble "$@" ;;
   zip) cmd_zip "${2:-}" ;;
-  *) sed -n '2,13p' "$0"; exit 2 ;;
+  *) sed -n '2,14p' "$0"; exit 2 ;;
 esac
