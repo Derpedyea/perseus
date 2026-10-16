@@ -2,15 +2,19 @@
 # perseus lab kit: collects hardware facts and inference benchmarks on the lab box and
 # logs everything to results/ on the USB. Usage: bash run.sh --help. Plain-language
 # instructions: README.txt.
-# Tests only: PERSEUS_PAUSE_AFTER=STEP-ID pauses after that step, as 'run.sh pause' would.
+# Tests only: PERSEUS_PAUSE_AFTER=STEP-ID pauses after that step, as 'run.sh pause' would;
+# PERSEUS_SYSFS_DRM=DIR stands in for /sys/class/drm (the GPU's clock switch, lib/gpu.sh).
 set -u
 
 KIT="$(cd "$(dirname "$0")" && pwd)"
 . "$KIT/lib/common.sh"
 . "$KIT/lib/ui.sh"
+. "$KIT/lib/gpu.sh"
 
 # Fixed path (not $HOME) so 'sudo bash run.sh' and 'bash run.sh clean' agree on it.
 LOCAL="${PERSEUS_LOCAL:-/var/tmp/perseus-kit-local}"
+# The GPU's performance level before phase 4b pinned it (lib/gpu.sh); here so 'clean' sees it too.
+DPM_RECORD="$LOCAL/gpu-dpm.restore"
 
 usage() {
   cat <<EOF
@@ -32,6 +36,7 @@ Commands
   pause     finish the current test, then stop
   stop      stop now; the current test reruns next time (same as Ctrl-C)
   clean     delete the model copies on this disk ($LOCAL)
+            (and put the GPU's clocks back if a cut-off run left them pinned)
   help      this text (also -h, --help)
 
 Options
@@ -90,6 +95,18 @@ FLASHNEXT=Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf
 FLASHNEXT_NGRAM=Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00002-of-00002.gguf
 
 # ---------- the plan: most decision-relevant data first ----------
+# (Helpers the plan's arguments call are defined here: 'status' evaluates the plan early.)
+# 6, 8, one per core, one per hardware thread: the distinct ones this box has.
+fn_threads() {
+  local t out="" seen=","
+  for t in 6 8 "$NPHYS" "$NCPUS"; do
+    [ "$t" -le "$NCPUS" ] || continue
+    case "$seen" in *",$t,"*) continue ;; esac
+    seen="$seen$t,"; out="${out:+$out,}$t"
+  done
+  echo "$out"
+}
+
 # phase NUM TITLE MINUTES (rough estimate for the Mac Pro) / S STEP-ID FUNCTION ARGS...
 plan() {
   phase 1 "machine facts + memory bandwidth" 5
@@ -131,11 +148,36 @@ plan() {
   # The target: Qwen3.8-Flash-Next (180B, 6B active), ISTA's GSQ-RCO IQ3_XXS (within 1% of BF16 on
   # AIME/GPQA/LiveCodeBench). CPU+GPU: attention, shared experts and router on the GPU, routed
   # experts in RAM on the perseus SSSE3 kernels. Same prompt and settings with and without the GPU.
-  phase 4 "Flash-Next: CPU+GPU vs CPU only" 45
+  phase 4 "Flash-Next: CPU+GPU vs CPU only" 35
   S 4-01-flashnext-stage step_stage "$FLASHNEXT"
   S 4-02-flashnext-ngram-stage step_stage "$FLASHNEXT_NGRAM"
   S 4-03-flashnext-cpu-gpu step_flashnext gpu
   S 4-04-flashnext-cpu-only step_flashnext cpu
+
+  # Where Flash-Next's CPU+GPU time goes (run 2: 278 ms a token against a ~85 ms bandwidth
+  # ceiling), and three free knobs. novis: GPU buffers in plain VRAM; ggml-vulkan asks for
+  # CPU-visible VRAM first, only 256 MB without Resizable BAR, and spills to system RAM over PCIe.
+  # dpm-high: the GPU's clocks pinned (lib/gpu.sh); it idles while the CPU runs the experts. dio:
+  # weights read into RAM instead of mmap. 4b-05 picks the fastest of 4b-01..04 for the rest.
+  # Every GPU step places the same way: all but the routed experts on the GPU. Staging (4-01/02) is
+  # done by now, so no background copy runs beside these.
+  phase 4b "Flash-Next: where the time goes" 45
+  S 4b-01-fn-base step_cfg base step_fn_bench gpu -p 512 -n 64 -r 3 -t "$NPHYS"
+  S 4b-02-fn-novis step_cfg novis step_fn_bench gpu -p 512 -n 64 -r 3 -t "$NPHYS"
+  S 4b-03-fn-dpm-high step_cfg dpm-high step_fn_bench gpu -p 512 -n 64 -r 3 -t "$NPHYS"
+  S 4b-04-fn-novis-dpm-high step_cfg novis-dpm-high step_fn_bench gpu -p 512 -n 64 -r 3 -t "$NPHYS"
+  S 4b-05-fn-pick step_fn_pick 4b-01-fn-base:base 4b-02-fn-novis:novis 4b-03-fn-dpm-high:dpm-high 4b-04-fn-novis-dpm-high:novis-dpm-high
+  S 4b-06-fn-threads step_cfg best step_fn_bench gpu -p 0 -n 64 -r 3 -t "$(fn_threads)"
+  # prompt batches: llama.cpp copies the experts to the GPU per batch (op offload) unless told not to
+  S 4b-07-fn-no-op-offload step_cfg best step_fn_bench gpu -p 512 -n 0 -r 3 -t "$NPHYS" -nopo 1
+  S 4b-08-fn-gpu-op-times step_cfg best step_fn_profile gpu-ops
+  S 4b-09-fn-cpu-profile step_cfg best step_fn_profile perf
+  # the spill mechanism on its own: the tiny model fully on the GPU, and 3-03's matmuls
+  S 4b-10-tiny-gpu-novis step_cfg novis step_gpu_bench "$TINY_Q40" 128 32 3
+  S 4b-11-gpu-op-bench-novis step_cfg novis step_gpu_op_bench
+  S 4b-12-fn-cpu-only step_fn_bench cpu -p 512 -n 64 -r 2 -t "$NPHYS"
+  # last: it reads 71 GB into RAM, which pushes the mmap steps' page cache out
+  S 4b-13-fn-load-dio step_cfg best step_fn_bench gpu -p 0 -n 64 -r 3 -t "$NPHYS" -lm dio
 
   phase 5 "compact 27Bs: Bonsai 2 (PQ2_0) vs Saluki (IQ2-mix)" 25
   S 5-01-bonsai-pq2-stage step_stage "$BONSAI"
@@ -213,6 +255,8 @@ latest_run_dir() {
 case "$CMD" in
   clean)
     if owner_alive; then echo "A run is active (pid $OWNER_PID); stop it first."; exit 1; fi
+    # The record of the GPU's pre-run level lives in $LOCAL: never delete it unrestored.
+    dpm_restore || { echo "Kept $LOCAL: it holds the GPU's original performance level ($DPM_RECORD). Try: sudo bash run.sh clean"; exit 1; }
     if [ -f "$LOCAL/.perseus-kit" ]; then rm -rf "$LOCAL" && echo "removed $LOCAL"; exit $?; fi
     echo "nothing to clean ($LOCAL is not a perseus kit folder)"; exit 0 ;;
   pause)
@@ -280,7 +324,7 @@ case "$CMD" in
             fi ;;
       esac
     }
-    FIRST_PHYS=0
+    FIRST_PHYS=0 NPHYS=1 NCPUS=1  # the plan's arguments; status only counts steps
     plan; flush_phase
     if [ -n "$PROBLEMS" ] && [ "$UI" = pretty ]; then
       printf '\n %sproblems%s  %sdetails: results/<run>/steps/<test>/stderr.txt%s\n%s' "$C_B" "$C_0" "$C_DIM" "$C_0" "$PROBLEMS"
@@ -291,12 +335,15 @@ case "$CMD" in
 esac
 
 # ---------- run: results folder, lock, signals ----------
+# Refusing to start still puts back GPU clocks a cut-off run left pinned (lib/gpu.sh), unless a live
+# run owns them.
+refuse() { echo "$1"; owner_alive || dpm_restore; exit 1; }
 mkdir -p "$KIT/results" 2>/dev/null
 probe="$KIT/results/.write-test.$$"
-if ! ( echo ok > "$probe" ) 2>/dev/null; then echo "Can't write to $KIT/results. Is the USB read-only or full?"; exit 1; fi
+( echo ok > "$probe" ) 2>/dev/null || refuse "Can't write to $KIT/results. Is the USB read-only or full?"
 rm -f "$probe"
 usb_free_kb=$(df -Pk "$KIT/results" | awk 'NR==2 {print $4}')
-if [ "${usb_free_kb:-0}" -lt 204800 ]; then echo "USB has under 200 MB free; results won't fit."; exit 1; fi
+[ "${usb_free_kb:-0}" -ge 204800 ] || refuse "USB has under 200 MB free; results won't fit."
 
 my_pgid() {
   if [ -r "/proc/$$/stat" ]; then awk '{print $5}' "/proc/$$/stat"; else ps -o pgid= -p $$ | tr -d ' '; fi
@@ -316,6 +363,7 @@ rm -f "$PAUSE_FLAG"  # a pause asked for while nothing ran is stale
 PREFETCH_PID=""
 cleanup() {
   [ -n "$PREFETCH_PID" ] && kill -TERM -- "-$PREFETCH_PID" 2>/dev/null
+  dpm_restore
   rm -rf "$LOCK"
 }
 trap cleanup EXIT
@@ -336,6 +384,7 @@ on_interrupt() {
     write_status "$RUN_DIR/steps/$CURRENT_STEP" interrupted 130 "$(now_s)"
     [ "$UI" = pretty ] && ui_step_line interrupted "$CURRENT_STEP" $(( $(now_s) - STEP_T0 )) "stopped; reruns next time"
   fi
+  dpm_restore
   write_summary
   say "Stopped. Run '$UI_CMD' again to continue from here."
   [ "$UI" = pretty ] && ui_end "$C_WARN" "Stopped." "'$UI_CMD' continues from here; an interrupted test reruns."
@@ -362,6 +411,7 @@ gate() {
 
 # ---------- tools: binaries, topology, CPU variant ----------
 mkdir -p "$LOCAL" && touch "$LOCAL/.perseus-kit" || { echo "Can't create $LOCAL"; exit 1; }
+dpm_restore  # a run cut off mid-step (kill -9, crash) may have left the GPU's clocks pinned
 BIN="$LOCAL/bin"
 VK_BIN="$BIN/stock-vk/nehalem"  # Vulkan build (the lab's GPU); nehalem only, see need_vk_build
 # GPU drivers keep a shader cache on disk (Mesa: $HOME/.cache/mesa_shader_cache, /root/.cache under
@@ -498,11 +548,15 @@ need_model() { # file -> sets MI (catalog index) and MP (path), or ends the step
   MP=$(model_path "$1"); [ -n "$MP" ] || skip "the copy of $1 failed its checksum"
 }
 
-# Records what else was going on, so a slow number can be explained later.
+# Records what else was going on, so a slow number can be explained later. Every timed step calls
+# it right before its command, after its own checks (model, GPU, tools): so a config that pins the
+# GPU's clocks (step_cfg) is applied here, and a step that can't run never touches the GPU.
 note_env() {
+  if [ "${FN_PIN:-0}" = 1 ]; then dpm_set_high; FN_PINNED=1; fi
   { echo "loadavg: $(cat /proc/loadavg)"
     echo "background copy: $(cat "$LOCAL/models/.copying" 2>/dev/null || echo none)"
     echo "overrides: $(env | grep -E '^(PERSEUS|GGML)_' | tr '\n' ' ')"
+    echo "gpu performance level: $(dpm_level)"
   } > "$STEP_DIR/env.txt"
 }
 
@@ -776,6 +830,12 @@ gpu_line_name() { echo "$1" | sed -n 's/^ *Vulkan[0-9][0-9]*: \(.*\) ([0-9][0-9]
 # one llama.cpp calls $GPU_DEV (a driver gone or a device added since 3-01, e.g. across a resume,
 # must not turn into CPU numbers or a different GPU's). Commands select it with -dev / -b $GPU_DEV.
 need_gpu() {
+  # Clocks still pinned by an earlier step whose restore failed (see run.log): numbers taken now
+  # would be at the wrong level, so the step waits (interrupted: it reruns next time).
+  if [ -f "$DPM_RECORD" ]; then
+    echo "the GPU's clocks are still pinned (putting them back failed, see run.log): deferred to the next run" > "$STEP_DIR/reason"
+    exit 130
+  fi
   need_vk_build
   [ -f "$RUN_DIR/gpu.env" ] || skip "no usable GPU (see steps/3-01-gpu-probe)"
   # Our own file, but check its shape before sourcing it.
@@ -868,28 +928,175 @@ step_gpu_bench() { # file n_prompt n_gen reps
   run_cmd 1800 "$VK_BIN/llama-bench" -m "$MP" -dev "$GPU_DEV" -ngl 99 -p "$2" -n "$3" -r "$4" -t "$NPHYS" -o jsonl
 }
 
+# Flash-Next's two files, staged side by side: sets MP (the file to open) and FN_NEED (bytes).
+need_flashnext() {
+  need_linux_llama
+  need_model "$FLASHNEXT_NGRAM"
+  local ngram="$MP" n="${M_SIZE[$MI]}"
+  need_model "$FLASHNEXT"
+  FN_NEED=$(( n + ${M_SIZE[$MI]} ))
+  # llama.cpp finds the n-gram file by name next to the first one
+  [ "$(dirname "$ngram")" = "$(dirname "$MP")" ] || skip "Flash-Next's two files are in different places ($(dirname "$MP"), $(dirname "$ngram")): one was staged, the other not"
+  need_vk_build
+}
+
 # Flash-Next, same binary, prompt, context, threads and greedy settings; only the GPU differs.
 #   gpu: llama.cpp's --fit fills the GPU back to front with each layer's attention, shared experts
 #        and router (routed experts stay in RAM) as far as free VRAM goes; -lv 4 logs its choices
 #   cpu: -dev none, so nothing reaches the GPU (with -ngl 0 the prompt's matmuls still would)
 # mmap (the default), not -lm none: a 75.8 GB model read into RAM would sit beside its page cache.
 step_flashnext() { # gpu|cpu
-  need_linux_llama
-  need_model "$FLASHNEXT_NGRAM"
-  local ngram="$MP" need="${M_SIZE[$MI]}"
-  need_model "$FLASHNEXT"
-  need=$(( need + ${M_SIZE[$MI]} ))
-  # llama.cpp finds the n-gram file by name next to the first one
-  [ "$(dirname "$ngram")" = "$(dirname "$MP")" ] || skip "Flash-Next's two files are in different places ($(dirname "$MP"), $(dirname "$ngram")): one was staged, the other not"
-  need_vk_build  # it runs both halves of this A/B
+  need_flashnext  # the Vulkan build runs both halves of this A/B
   local dev
   # cpu: Vulkan not even loaded, so a GPU driver left wedged by an earlier step can't take the
   # CPU baseline down with it
   if [ "$1" = gpu ]; then need_gpu; dev=(-dev "$GPU_DEV" -fit on -lv 4); else dev=(-dev none); GGML_DISABLE_VULKAN=1; export GGML_DISABLE_VULKAN; fi
-  ram_check "$need"
+  ram_check "$FN_NEED"
   note_env
   run_cmd 3600 "$VK_BIN/llama-completion" -m "$MP" "${dev[@]}" -c 4096 -p "$PROMPT_LONG" -n 128 \
     --temp 0 --top-k 1 --seed 42 -t "$NPHYS" -no-cnv < /dev/null
+}
+
+# ---------- phase 4b: Flash-Next profile ----------
+# Each GPU step: everything but the routed experts on the GPU (8 GB holds that: 5.4 GB), the experts
+# in RAM. Fixed instead of -fit: llama-bench re-fits by freeing and reloading the model for every
+# test it runs, and a fixed split keeps the A/B steps comparable.
+FN_GPU_SPLIT="-ngl 99 -ot exps=CPU"
+
+# Runs a step under one of 4b's configs (see the plan). best = what 4b-05 picked, for Flash-Next
+# steps only: Flash-Next not on this USB ends it absent (it runs once a USB has it); otherwise
+# nothing picked ends it skipped, never quietly run as base. dpm-high pins the GPU's clocks for this
+# step only, from note_env (after the step's own checks); the runner puts them back when the step
+# ends, however it ends (lib/gpu.sh). A step that never reached note_env can't report pinned numbers.
+step_cfg() { # base|novis|dpm-high|novis-dpm-high|best step args...
+  local cfg="$1" rc=0; shift
+  if [ "$cfg" = best ]; then
+    need_flashnext
+    [ -f "$RUN_DIR/fn-best.env" ] || skip "4b-05 picked no config"
+    cfg=$(sed -n 's/^FN_BEST=//p' "$RUN_DIR/fn-best.env")
+  fi
+  echo "$cfg" > "$STEP_DIR/config.txt"
+  case "$cfg" in
+    base) ;;
+    novis) export GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1 ;;
+    dpm-high) FN_PIN=1 ;;
+    novis-dpm-high) export GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1; FN_PIN=1 ;;
+    *) echo "unknown config '$cfg' (fn-best.env damaged?)" >&2; exit 1 ;;
+  esac
+  "$@" || rc=$?
+  if [ "${FN_PIN:-0}" = 1 ] && [ "${FN_PINNED:-0}" != 1 ] && [ "$rc" = 0 ]; then
+    echo "kit error: $cfg asked for pinned clocks but $1 never applied them (no note_env)" >&2; return 1
+  fi
+  return "$rc"
+}
+
+# llama-bench on Flash-Next. gpu: the fixed split, with the GPU's busy % and clocks sampled into
+# gpu-samples.txt; cpu: nothing on the GPU, Vulkan not loaded (as 4-04).
+step_fn_bench() { # gpu|cpu llama-bench args...
+  local where="$1" dev rc=0; shift
+  need_flashnext
+  if [ "$where" = gpu ]; then need_gpu; dev=(-dev "$GPU_DEV" $FN_GPU_SPLIT)
+  else dev=(-dev none); GGML_DISABLE_VULKAN=1; export GGML_DISABLE_VULKAN; fi
+  ram_check "$FN_NEED"
+  note_env
+  [ "$where" = gpu ] && gpu_sampler_start "$STEP_DIR/gpu-samples.txt"
+  run_cmd 3600 "$VK_BIN/llama-bench" -m "$MP" "${dev[@]}" "$@" -o jsonl < /dev/null || rc=$?
+  gpu_sampler_stop
+  return "$rc"
+}
+
+# The fastest decode (tg) of the given steps that finished ok, into $RUN_DIR/fn-best.env for the
+# 'best' steps. Flash-Next not on this USB: absent, like them. A bench that ran (ok without a
+# number, failed, timeout, crashed) yet none has a number: failed. All of them skipped (no GPU):
+# skipped. Either way the 'best' steps then skip.
+step_fn_pick() { # step-id:config...
+  rm -f "$RUN_DIR/fn-best.env"
+  need_flashnext
+  local spec id cfg st ts best="" best_ts=0 ran=0
+  for spec in "$@"; do
+    id=${spec%%:*} cfg=${spec#*:}
+    st=$(cat "$RUN_DIR/steps/$id/status" 2>/dev/null)
+    ts=$(grep '"n_prompt": 0,' "$RUN_DIR/steps/$id/stdout.txt" 2>/dev/null | sed -n 's/.*"avg_ts": *\([0-9.]*\).*/\1/p' | head -1)
+    echo "$cfg ($id, ${st:-not run}): ${ts:-no decode number} tok/s"
+    case "$st" in ok|failed|timeout|crashed) ran=1 ;; esac
+    [ "$st" = ok ] && [ -n "$ts" ] || continue
+    if awk -v a="$ts" -v b="$best_ts" 'BEGIN { exit !(a > b) }'; then best=$cfg best_ts=$ts; fi
+  done
+  if [ -z "$best" ]; then
+    [ "$ran" = 1 ] || skip "none of the benches to pick from ran (see their reasons)"
+    echo "no decode number from any of: $*" >&2; return 1
+  fi
+  echo "FN_BEST=$best" > "$RUN_DIR/fn-best.env"
+  echo "picked: $best ($best_ts tok/s)"
+}
+
+# 64 tokens of Flash-Next through llama-completion, the fixed split, profiled.
+#   gpu-ops: ggml-vulkan's per-op GPU timer (GGML_VK_PERF_LOGGER), for every graph (warmup and prompt
+#            included). It puts a barrier between ops, so the sum overstates the GPU's share; use it
+#            for the split between ops.
+#   perf:    where the CPU threads spend their time while generating (perf record, 999 Hz), reported
+#            here with symbols (the Vulkan build's llama-completion keeps them). Needs sudo on Ubuntu.
+#            -N: no build-id cache in root's home; the kit writes nothing outside $LOCAL.
+step_fn_profile() { # gpu-ops|perf
+  need_flashnext
+  need_gpu
+  ram_check "$FN_NEED"
+  local gen=(-m "$MP" -dev "$GPU_DEV" $FN_GPU_SPLIT -c 4096 -p "$PROMPT_LONG" -n 64 --temp 0 --top-k 1 --seed 42 -t "$NPHYS" -no-cnv)
+  case "$1" in
+    gpu-ops)
+      GGML_VK_PERF_LOGGER=1; export GGML_VK_PERF_LOGGER
+      note_env
+      run_cmd 1800 "$VK_BIN/llama-completion" "${gen[@]}" < /dev/null ;;
+    perf)
+      command -v perf >/dev/null 2>&1 || skip "perf is not installed"
+      local v; v=$(perf version 2>&1) || skip "perf doesn't run here: $(echo "$v" | tr '\n' ' ' | head -c 200)"
+      fn_perf_probe
+      note_env
+      fn_perf_attach
+      local rc=0 prc=0
+      run_cmd 1800 "$VK_BIN/llama-completion" "${gen[@]}" < /dev/null || rc=$?
+      touch "$STEP_DIR/.lc-done"; wait "$PERF_ATTACH" || prc=$?
+      [ "$rc" = 0 ] || return "$rc"
+      [ "$prc" = 0 ] || { echo "perf record exited $prc (see perf-record.txt)" >&2; return 1; }
+      [ -s "$STEP_DIR/perf.data" ] || { echo "perf recorded nothing (see perf-record.txt)" >&2; return 1; }
+      run_cmd 600 perf report -i "$STEP_DIR/perf.data" --stdio --no-children --sort dso,sym --percent-limit 0.2 > "$STEP_DIR/report-sym.txt" 2>&1 || return $?
+      run_cmd 600 perf report -i "$STEP_DIR/perf.data" --stdio --no-children --sort pid,dso --percent-limit 0.5 > "$STEP_DIR/report-thread.txt" 2>&1 ;;
+    *) echo "unknown profile '$1'" >&2; return 1 ;;
+  esac
+}
+
+# Can perf attach to another process here, as 4b-09 will? Ubuntu forbids it without sudo
+# (perf_event_paranoid, Yama ptrace scope). Tried on a 1 s 'sleep', so a refusal skips the step
+# before Flash-Next loads (30-190 s).
+fn_perf_probe() {
+  local t out rc=0
+  sleep 1 & t=$!
+  out=$(perf record -q -N -F 99 -p "$t" -o "$STEP_DIR/perf-probe.data" 2>&1) || rc=$?
+  kill "$t" 2>/dev/null; wait "$t" 2>/dev/null; rm -f "$STEP_DIR/perf-probe.data"
+  [ "$rc" = 0 ] || skip "perf can't attach to a process here (sudo bash run.sh): $(echo "$out" | tr '\n' ' ' | head -c 160)"
+}
+
+# Attaches perf to the step's llama-completion once it has loaded and warmed up (its "generate:"
+# line), so the profile is generation (17 prompt tokens + 64 decoded), not 30-190 s of loading.
+# perf record -p ends when that process ends. In the background, where SIGINT is ignored: the
+# benchmark stays in the foreground for Ctrl-C, and this loop polls its step and a done flag.
+fn_perf_attach() {
+  local step=$BASHPID
+  rm -f "$STEP_DIR/.lc-done"
+  (
+    until grep -q 'generate: n_ctx' "$STEP_DIR/stderr.txt" 2>/dev/null; do
+      [ -f "$STEP_DIR/.lc-done" ] && exit 0
+      kill -0 "$step" 2>/dev/null || exit 0
+      sleep 0.2
+    done
+    # this step's own llama-completion: run_cmd's 'timeout' child, or the step's direct child
+    t=$(pgrep -P "$step" -x timeout | head -1)
+    if [ -n "$t" ]; then pid=$(pgrep -P "$t" | head -1); else pid=$(pgrep -P "$step" -f llama-completion | head -1); fi
+    [ -n "$pid" ] || { echo "llama-completion logged 'generate:' but its pid wasn't found"; exit 0; }
+    echo "perf record -F 999 -N -p $pid -o $STEP_DIR/perf.data"
+    exec perf record -F 999 -N -p "$pid" -o "$STEP_DIR/perf.data"
+  ) > "$STEP_DIR/perf-record.txt" 2>&1 &
+  PERF_ATTACH=$!
 }
 
 # A/B variants of the steps above (the kernels/ patches read these at startup)
@@ -912,6 +1119,7 @@ phase() { ui_phase "$@"; }
 S() {
   UI_N=$((UI_N + 1))
   gate; run_step "$@"
+  dpm_restore
   if [ "$1" = "${PERSEUS_PAUSE_AFTER:-}" ]; then touch "$PAUSE_FLAG"; fi
 }
 
@@ -923,7 +1131,7 @@ say "CPU build: $VARIANT | NUMA nodes: $NODES | cores: $NPHYS (threads $NCPUS)${
 if [ "$ON_USB" = 0 ]; then
   say "Diagnostics kit: no models on this USB, so only phases 1-3 run (~15 min); model tests are marked 'absent'."
 else
-  say "Phases 1-4 are the important data (~60 min; Flash-Next's copy over USB 2.0 is most of it)."
+  say "Phases 1-4b are the important data (~1 h; ~30 min more if Flash-Next isn't on this disk yet)."
 fi
 say "Stop any time: Ctrl-C here, or '$UI_CMD pause' / '$UI_CMD stop' in another terminal."
 if [ "$UI" = pretty ]; then
@@ -931,13 +1139,16 @@ if [ "$UI" = pretty ]; then
   nodes="$NODES NUMA node"; [ "$NODES" = 1 ] || nodes="${nodes}s"
   ui_kv cpu "$VARIANT build, $NPHYS cores / $NCPUS threads, $nodes"
   if [ "$ON_USB" = 0 ]; then ui_kv models "none on this USB: phases 1-3 only (~15 min)"
-  else ui_kv models "$ON_USB files on this USB; phases 1-4 are the key data (~60 min)"; fi
+  else ui_kv models "$ON_USB files on this USB; phases 1-4b are the key data (~1 h)"; fi
   if [ -n "$BUDGET_MIN" ]; then
     end=$(( $(date +%s) + DEADLINE - $(now_s) ))  # the enforced deadline, set before setup ran
     ui_kv time "no new tests after $(date -d "@$end" +%H:%M 2>/dev/null || date -r "$end" +%H:%M) (--for $BUDGET_ARG)"
   fi
   [ "$UI_DONE" -gt 0 ] && ui_kv resume "$UI_DONE of $UI_TOTAL tests done earlier"
   ui_kv stop "Ctrl-C, or from a second terminal: $UI_CMD pause | stop"
+fi
+if [ "$ON_USB" != 0 ] && [ "$(id -u)" != 0 ]; then
+  log "!! not under sudo: phase 4b's GPU clock tests and CPU profile will be skipped. Ctrl-C and run: sudo bash run.sh"
 fi
 start_prefetch
 plan

@@ -141,7 +141,8 @@ build_vulkan() {
     d=/work/bin/stock-vk/nehalem
     rm -rf \$d && mkdir -p \$d/lib
     for t in $VK_TARGETS; do
-      cp /work/build/stock-vk-nehalem/bin/\$t \$d/ && strip \$d/\$t && patchelf --set-rpath '\$ORIGIN/lib' \$d/\$t
+      # llama-completion keeps its symbols (+3 MB): run.sh's CPU profile (perf, step 4b-09) names functions
+      cp /work/build/stock-vk-nehalem/bin/\$t \$d/ && { [ \$t = llama-completion ] || strip \$d/\$t; } && patchelf --set-rpath '\$ORIGIN/lib' \$d/\$t
       need=\$(objdump -p \$d/\$t | awk '/NEEDED/ {print \$2}' | sort | tr '\n' ' ')
       [ \"\$need\" = 'ld-linux-x86-64.so.2 libc.so.6 libm.so.6 libvulkan.so.1 ' ] || { echo \"\$t needs: \$need\"; exit 1; }
     done

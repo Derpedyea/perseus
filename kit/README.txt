@@ -18,11 +18,18 @@ even a short visit gets the key data, and it continues where it stopped.
    It stops starting new tests after 95 minutes and finishes the one it is
    on (a few minutes), leaving time to pack up. --for also takes hours:
    --for 8h, --for 1h30m. Overnight, leave it out: it runs every test.
-   sudo bash run.sh --help lists everything it can do. Phases 1-4 (~60 min) are
-   the important data; 5-8 are older comparisons and extras.
-   Phase 3 uses the graphics card: the screen may stutter for a moment.
-   Phase 4 waits until the big model (75.8 GB) is copied off the USB,
-   about 35 minutes on the Mac's USB 2.0 ports; phases 1-3 run meanwhile.
+   sudo bash run.sh --help lists everything it can do. Phases 1-4b are the
+   important data: about 1 hour, plus ~30 minutes if the big model (75.8 GB)
+   isn't on the Mac's disk from last time. Phases 5-8 are older comparisons
+   whose models aren't on this USB any more; they show as "need models not
+   on this USB" and take no time.
+   Please do use sudo: phase 4b pins the graphics card's clocks for a few
+   tests (and puts them back after each one) and profiles the CPU, and both
+   need it. Without sudo those tests are skipped.
+   Phases 3 and 4b use the graphics card: the screen may stutter for a moment.
+   Phase 4 waits until the big model is copied off the USB (about 35 minutes
+   on the Mac's USB 2.0 ports; phases 1-3 run meanwhile), unless it is still
+   on the Mac's disk.
 
 4. While it runs, from a second terminal (same folder, also with sudo):
        sudo bash run.sh status    how far it is
@@ -46,6 +53,8 @@ Each copy starts only if the disk has the model's size + 5 GB free; otherwise
 that model runs straight from the USB (slow loads). Delete them when you're
 completely done:
        sudo bash run.sh clean
+(If a run was cut off while the graphics card's clocks were pinned, the next
+run or 'clean' puts them back; so does a reboot.)
 
 USB format: must be exFAT or ext4. FAT32 can't hold files over 4 GB.
 
