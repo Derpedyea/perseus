@@ -10,11 +10,19 @@ now_s() {
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
-log() {
-  local line="[$(date +%H:%M:%S)] $*"
-  echo "$line"
-  [ -n "${RUN_DIR:-}" ] && echo "$line" >> "$RUN_DIR/run.log"
-  return 0
+# log/record (run.log + screen) live in ui.sh.
+
+# "95" (minutes), "90m", "8h" or "1h30m" -> whole minutes. Fails on anything else, on 0 and on
+# more than a week.
+parse_minutes() { # text
+  local h=0 m=0
+  if [[ "$1" =~ ^([0-9]+)m?$ ]]; then m=${BASH_REMATCH[1]}
+  elif [[ "$1" =~ ^([0-9]+)h(([0-9]+)m)?$ ]]; then h=${BASH_REMATCH[1]}; m=${BASH_REMATCH[3]:-0}
+  else return 1; fi
+  [ ${#h} -le 4 ] && [ ${#m} -le 6 ] || return 1  # before the arithmetic can overflow
+  m=$(( 10#$h * 60 + 10#$m ))  # 10#: "08" is not octal
+  [ "$m" -gt 0 ] && [ "$m" -le 10080 ] || return 1
+  echo "$m"
 }
 
 json_str() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n\t' '  '; }
@@ -106,15 +114,22 @@ run_step() {
   case "$prev" in
     ok|skipped) return 0 ;;
     failed|timeout|crashed)
-      if [ "$RETRY_FAILED" != 1 ]; then log "-- $id: previously $prev, not retrying (use --retry-failed)"; return 0; fi ;;
+      if [ "$RETRY_FAILED" != 1 ]; then
+        say "-- $id: previously $prev, not retrying (use --retry-failed)"
+        [ "$UI" = pretty ] && ui_step_line "$prev" "$id" "" "$prev earlier, not retried (--retry-failed retries)"
+        return 0
+      fi ;;
   esac
   rm -rf "$d"; mkdir -p "$d"
   echo "$(ts)" > "$d/started"
   CURRENT_STEP="$id"
   local t0; t0=$(now_s)
-  log ">> $id"
+  STEP_T0=$t0
+  say ">> $id"
+  ui_tick_start "$id"
   local rc=0
   ( STEP_DIR="$d"; export STEP_DIR; "$@" ) < /dev/null > "$d/stdout.txt" 2> "$d/stderr.txt" || rc=$?
+  ui_tick_stop
   local st=ok
   case "$rc" in
     0) st=ok ;;
@@ -125,10 +140,11 @@ run_step() {
   esac
   write_status "$d" "$st" "$rc" "$t0"
   CURRENT_STEP=""
-  local extra=""
-  [ -f "$d/reason" ] && extra=" ($(head -c 160 "$d/reason"))"
-  [ "$st" = failed ] && extra=" (exit $rc; see steps/$id/stderr.txt)"
-  log "   $id: $st in $(fmt_dur $(( $(now_s) - t0 )))$extra"
+  local extra="" note="" took=$(( $(now_s) - t0 ))
+  [ -f "$d/reason" ] && note=$(head -c 160 "$d/reason") && extra=" ($note)"
+  [ "$st" = failed ] && extra=" (exit $rc; see steps/$id/stderr.txt)" && note="exit $rc, see steps/$id/stderr.txt"
+  say "   $id: $st in $(fmt_dur "$took")$extra"
+  [ "$UI" = pretty ] && ui_step_line "$st" "$id" "$took" "$note"
   return 0
 }
 

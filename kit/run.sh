@@ -1,46 +1,78 @@
 #!/usr/bin/env bash
 # perseus lab kit: collects hardware facts and inference benchmarks on the lab box and
-# logs everything to results/ on the USB. Plain-language instructions: README.txt.
-#
-#   bash run.sh [--for MINUTES]   run, most important tests first; continues an unfinished run
-#   bash run.sh status            progress of the current run (works from a second terminal)
-#   bash run.sh pause             finish the current test, then stop (second terminal)
-#   bash run.sh stop              stop now; the current test reruns next time (same as Ctrl-C)
-#   bash run.sh clean             delete the model copies on the local disk
-# Options:
-#   --for MINUTES    don't start new tests after this many minutes
-#   --retry-failed   also rerun tests that failed, timed out or crashed last time
-#   --new            start a fresh results folder instead of continuing
-#   --no-copy        run models straight off the USB (slow loads, no local disk use)
-# Troubleshooting: PERSEUS_VARIANT=penryn|nehalem|haswell forces the CPU build.
+# logs everything to results/ on the USB. Usage: bash run.sh --help. Plain-language
+# instructions: README.txt.
 # Tests only: PERSEUS_PAUSE_AFTER=STEP-ID pauses after that step, as 'run.sh pause' would.
 set -u
 
 KIT="$(cd "$(dirname "$0")" && pwd)"
 . "$KIT/lib/common.sh"
+. "$KIT/lib/ui.sh"
 
-CMD=run BUDGET_MIN="" RETRY_FAILED=0 NEW_RUN=0 NO_COPY=0
+# Fixed path (not $HOME) so 'sudo bash run.sh' and 'bash run.sh clean' agree on it.
+LOCAL="${PERSEUS_LOCAL:-/var/tmp/perseus-kit-local}"
+
+usage() {
+  cat <<EOF
+perseus lab kit: measures this machine and the models on this USB.
+Results go to results/ on the USB. Plain-language instructions: README.txt
+
+Usage
+  $UI_CMD [--for TIME] [--retry-failed] [--new] [--no-copy]
+  $UI_CMD status | pause | stop | clean | help
+
+Examples
+  $UI_CMD --for 95m    a 2-hour visit: no new tests after 95 min
+  $UI_CMD              overnight: run everything
+  $UI_CMD status       how far it is (from a second terminal)
+
+Commands
+  (none)    run the tests, most important first; continues an unfinished run
+  status    progress of the current run
+  pause     finish the current test, then stop
+  stop      stop now; the current test reruns next time (same as Ctrl-C)
+  clean     delete the model copies on this disk ($LOCAL)
+  help      this text (also -h, --help)
+
+Options
+  --for TIME      don't start new tests after TIME: 95 (min), 90m, 8h, 1h30m
+  --retry-failed  also rerun tests that failed, timed out or crashed
+  --new           start a fresh results folder instead of continuing
+  --no-copy       run models straight off the USB (slow loads, no disk use)
+
+Environment
+  PERSEUS_VARIANT=penryn|nehalem|haswell   force a CPU build (troubleshooting)
+  NO_COLOR=1                               no colours on screen
+EOF
+}
+# Errors go to stderr, exit 2.
+usage_error() { printf 'run.sh: %s\nRun "%s --help" for usage.\n' "$1" "$UI_CMD" >&2; exit 2; }
+
+CMD=run BUDGET_SET=0 BUDGET_ARG="" BUDGET_MIN="" RETRY_FAILED=0 NEW_RUN=0 NO_COPY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     status|pause|stop|clean) CMD="$1" ;;
-    --for) BUDGET_MIN="${2:-}"; shift ;;
+    help|-h|--help) usage; exit 0 ;;
+    --for) [ $# -ge 2 ] || usage_error "--for needs a time, e.g. --for 95m or --for 8h"
+           BUDGET_SET=1 BUDGET_ARG="$2"; shift ;;
+    --for=*) BUDGET_SET=1 BUDGET_ARG="${1#--for=}" ;;
     --retry-failed) RETRY_FAILED=1 ;;
     --new) NEW_RUN=1 ;;
     --no-copy) NO_COPY=1 ;;
-    *) echo "unknown argument: $1 (see the top of run.sh)"; exit 2 ;;
+    *) usage_error "unknown argument '$1'" ;;
   esac
   shift
 done
-case "$BUDGET_MIN" in
-  '') ;;
-  *[!0-9]*|0) echo "--for needs a whole number of minutes, e.g. --for 95"; exit 2 ;;
-esac
+# An empty --for= is an error too, not "no limit".
+if [ "$BUDGET_SET" = 1 ]; then
+  BUDGET_MIN=$(parse_minutes "$BUDGET_ARG") \
+    || usage_error "--for '$BUDGET_ARG' isn't a time: use minutes (95) or 90m, 8h, 1h30m (at most a week)"
+fi
+ui_init
 
 OS=$(uname -s)
 HOST=$(hostname 2>/dev/null | cut -d. -f1)
 [ -n "$HOST" ] || HOST=unknown
-# Fixed path (not $HOME) so 'sudo bash run.sh' and 'bash run.sh clean' agree on it.
-LOCAL="${PERSEUS_LOCAL:-/var/tmp/perseus-kit-local}"
 LOCK="$KIT/results/.lock"
 PAUSE_FLAG="$KIT/results/.pause"
 PROMPT=$'def is_prime(n):\n    """Return True if n is a prime number."""\n'
@@ -198,12 +230,32 @@ case "$CMD" in
     [ -n "$RUN_DIR" ] || { echo "No runs on this machine yet."; exit 0; }
     if [ -f "$RUN_DIR/FINISHED" ]; then state="finished"
     elif owner_alive; then state="running (pid $OWNER_PID)"; [ -f "$PAUSE_FLAG" ] && state="$state, pausing after the current test"
-    else state="stopped; 'bash run.sh' continues it"; fi
-    echo "run:   $(basename "$RUN_DIR")"
-    echo "state: $state"
+    else state="stopped; '$UI_CMD' continues it"; fi
+    if [ "$UI" = pretty ]; then
+      printf ' %sperseus lab kit%s  %s\n   %sstate%s  %s\n\n' "$C_B" "$C_0" "$(basename "$RUN_DIR")" "$C_DIM" "$C_0" "$state"
+    else
+      echo "run:   $(basename "$RUN_DIR")"
+      echo "state: $state"
+    fi
     P_TITLE="" PROBLEMS=""
     flush_phase() {
       [ -n "$P_TITLE" ] || return 0
+      if [ "$UI" = pretty ]; then
+        local n_done=$((P_OK + P_SKIP + P_BAD)) g=" " c="" notes=""
+        if [ -n "$P_NOW" ]; then g=$G_RUN c=$C_RUN
+        elif [ "$P_BAD" -gt 0 ]; then g=$G_BAD c=$C_BAD
+        elif [ "$n_done" -eq "$P_TOTAL" ]; then g=$G_OK c=$C_OK
+        elif [ $((n_done + P_ABS)) -eq "$P_TOTAL" ]; then g=$G_ABS c=$C_DIM
+        fi
+        local fill=$((n_done * 10 / P_TOTAL))
+        [ "$P_SKIP" -gt 0 ] && notes="$P_SKIP skipped"
+        [ "$P_ABS" -gt 0 ] && notes="${notes:+$notes, }$P_ABS need models not on this USB"
+        printf ' %s%s%s %-44s %s%s%s%s%s %2d/%-2d %s%s%s\n' "$c" "$g" "$C_0" "$(ui_fit 44 "$P_TITLE")" \
+          "$c" "$(ui_repeat "$fill" "$G_FULL")" "$C_DIM" "$(ui_repeat $((10 - fill)) "$G_EMPTY")" "$C_0" \
+          "$n_done" "$P_TOTAL" "$C_DIM" "$notes" "$C_0"
+        [ -n "$P_NOW" ] && printf '   %snow%s %s\n' "$C_DIM" "$C_0" "$P_NOW"
+        return 0
+      fi
       local extra=""
       [ "$P_SKIP" -gt 0 ] && extra=" ($P_SKIP skipped)"
       [ "$P_ABS" -gt 0 ] && extra="$extra ($P_ABS need models not on this USB)"
@@ -219,16 +271,22 @@ case "$CMD" in
         ok) P_OK=$((P_OK + 1)) ;;
         skipped) P_SKIP=$((P_SKIP + 1)) ;;
         absent) P_ABS=$((P_ABS + 1)) ;;
-        failed|timeout|crashed) P_BAD=$((P_BAD + 1)); PROBLEMS="$PROBLEMS  $1: $st"$'\n' ;;
+        failed|timeout|crashed) P_BAD=$((P_BAD + 1))
+          if [ "$UI" = pretty ]; then PROBLEMS="$PROBLEMS   $C_BAD$G_BAD$C_0 $1  $st"$'\n'
+          else PROBLEMS="$PROBLEMS  $1: $st"$'\n'; fi ;;
         '') if [ -f "$d/started" ] && owner_alive; then
               local age=$(( $(date +%s) - $(stat -c %Y "$d/started" 2>/dev/null || stat -f %m "$d/started") ))
-              P_NOW="$1 ($(fmt_dur "$age"))"
+              if [ "$UI" = pretty ]; then P_NOW="$1 ($(ui_dur "$age"))"; else P_NOW="$1 ($(fmt_dur "$age"))"; fi
             fi ;;
       esac
     }
     FIRST_PHYS=0
     plan; flush_phase
-    [ -z "$PROBLEMS" ] || printf 'problems (details in results/<run>/steps/<test>/stderr.txt):\n%s' "$PROBLEMS"
+    if [ -n "$PROBLEMS" ] && [ "$UI" = pretty ]; then
+      printf '\n %sproblems%s  %sdetails: results/<run>/steps/<test>/stderr.txt%s\n%s' "$C_B" "$C_0" "$C_DIM" "$C_0" "$PROBLEMS"
+    elif [ -n "$PROBLEMS" ]; then
+      printf 'problems (details in results/<run>/steps/<test>/stderr.txt):\n%s' "$PROBLEMS"
+    fi
     exit 0 ;;
 esac
 
@@ -269,15 +327,18 @@ pick_run_dir() {
 }
 RUN_DIR=$(pick_run_dir)
 mkdir -p "$RUN_DIR/steps"
-CURRENT_STEP=""
+CURRENT_STEP="" STEP_T0=0
 
 on_interrupt() {
+  ui_tick_stop
   if [ -n "$CURRENT_STEP" ]; then
     echo "stopped by user" > "$RUN_DIR/steps/$CURRENT_STEP/reason"
     write_status "$RUN_DIR/steps/$CURRENT_STEP" interrupted 130 "$(now_s)"
+    [ "$UI" = pretty ] && ui_step_line interrupted "$CURRENT_STEP" $(( $(now_s) - STEP_T0 )) "stopped; reruns next time"
   fi
   write_summary
-  log "Stopped. Run 'bash run.sh' again to continue from here."
+  say "Stopped. Run '$UI_CMD' again to continue from here."
+  [ "$UI" = pretty ] && ui_end "$C_WARN" "Stopped." "'$UI_CMD' continues from here; an interrupted test reruns."
   exit 130
 }
 trap on_interrupt INT TERM HUP
@@ -290,11 +351,12 @@ export DEADLINE PAUSE_FLAG
 gate() {
   local why=""
   [ -f "$PAUSE_FLAG" ] && why="Paused"
-  [ -n "$DEADLINE" ] && [ "$(now_s)" -ge "$DEADLINE" ] && why="Time limit (--for $BUDGET_MIN) reached"
+  [ -n "$DEADLINE" ] && [ "$(now_s)" -ge "$DEADLINE" ] && why="Time limit (--for $BUDGET_ARG) reached"
   [ -n "$why" ] || return 0
   rm -f "$PAUSE_FLAG"
   write_summary
-  log "$why. Results so far are saved. Run 'bash run.sh' to continue from here."
+  say "$why. Results so far are saved. Run '$UI_CMD' to continue from here."
+  [ "$UI" = pretty ] && ui_end "$C_WARN" "$why." "Results so far are saved; '$UI_CMD' continues from here."
   exit 0
 }
 
@@ -836,22 +898,47 @@ step_bench_tiled_off() { export GGML_CPU_TILED_MM=0; step_bench "$@"; }
 step_bench_repack_off() { export PERSEUS_REPACK=0; step_bench "$@"; }
 
 # ---------- go ----------
-phase() { log "== Phase $1: $2 (~$3 min on the Mac Pro, rough)"; }
+# A dry pass over the plan for the screen: step count, widest id, steps done on an earlier day.
+UI_DONE=0
+phase() { :; }
 S() {
+  UI_TOTAL=$((UI_TOTAL + 1))
+  [ ${#1} -gt "$UI_IDW" ] && UI_IDW=${#1}
+  case "$(cat "$RUN_DIR/steps/$1/status" 2>/dev/null)" in ok|skipped) UI_DONE=$((UI_DONE + 1)) ;; esac
+}
+plan
+ui_fit_live
+phase() { ui_phase "$@"; }
+S() {
+  UI_N=$((UI_N + 1))
   gate; run_step "$@"
   if [ "$1" = "${PERSEUS_PAUSE_AFTER:-}" ]; then touch "$PAUSE_FLAG"; fi
 }
 
-log "perseus lab kit -> $RUN_DIR"
-log "CPU build: $VARIANT | NUMA nodes: $NODES | cores: $NPHYS (threads $NCPUS)${BUDGET_MIN:+ | stops starting tests after $BUDGET_MIN min}"
+UI_T0=$(now_s)
 ON_USB=0
 for f in ${M_FILE[@]+"${M_FILE[@]}"}; do [ -f "$KIT/models/$f" ] && ON_USB=$((ON_USB + 1)); done
+say "perseus lab kit -> $RUN_DIR"
+say "CPU build: $VARIANT | NUMA nodes: $NODES | cores: $NPHYS (threads $NCPUS)${BUDGET_MIN:+ | stops starting tests after $BUDGET_MIN min}"
 if [ "$ON_USB" = 0 ]; then
-  log "Diagnostics kit: no models on this USB, so only phases 1-3 run (~15 min); model tests are marked 'absent'."
+  say "Diagnostics kit: no models on this USB, so only phases 1-3 run (~15 min); model tests are marked 'absent'."
 else
-  log "Phases 1-4 are the important data (~60 min; Flash-Next's copy over USB 2.0 is most of it)."
+  say "Phases 1-4 are the important data (~60 min; Flash-Next's copy over USB 2.0 is most of it)."
 fi
-log "Stop any time: Ctrl-C here, or 'bash run.sh pause' / 'bash run.sh stop' in another terminal."
+say "Stop any time: Ctrl-C here, or '$UI_CMD pause' / '$UI_CMD stop' in another terminal."
+if [ "$UI" = pretty ]; then
+  printf '\n %sperseus lab kit%s  %s%s%s\n' "$C_B" "$C_0" "$C_DIM" "$(basename "$RUN_DIR")" "$C_0"
+  nodes="$NODES NUMA node"; [ "$NODES" = 1 ] || nodes="${nodes}s"
+  ui_kv cpu "$VARIANT build, $NPHYS cores / $NCPUS threads, $nodes"
+  if [ "$ON_USB" = 0 ]; then ui_kv models "none on this USB: phases 1-3 only (~15 min)"
+  else ui_kv models "$ON_USB files on this USB; phases 1-4 are the key data (~60 min)"; fi
+  if [ -n "$BUDGET_MIN" ]; then
+    end=$(( $(date +%s) + DEADLINE - $(now_s) ))  # the enforced deadline, set before setup ran
+    ui_kv time "no new tests after $(date -d "@$end" +%H:%M 2>/dev/null || date -r "$end" +%H:%M) (--for $BUDGET_ARG)"
+  fi
+  [ "$UI_DONE" -gt 0 ] && ui_kv resume "$UI_DONE of $UI_TOTAL tests done earlier"
+  ui_kv stop "Ctrl-C, or from a second terminal: $UI_CMD pause | stop"
+fi
 start_prefetch
 plan
 write_summary
@@ -859,4 +946,15 @@ touch "$RUN_DIR/FINISHED"
 n_absent=$(grep -l '^absent$' "$RUN_DIR"/steps/*/status 2>/dev/null | wc -l | tr -d ' ')
 absent_note=""
 [ "$n_absent" -gt 0 ] && absent_note=" ($n_absent tests need models this USB doesn't carry)"
-log "DONE$absent_note. Results: $RUN_DIR (summary.txt has the headline numbers). Eject the USB and bring it back."
+say "DONE$absent_note. Results: $RUN_DIR (summary.txt has the headline numbers). Eject the USB and bring it back."
+if [ "$UI" = pretty ]; then
+  count() { grep -l -x -E "$1" "$RUN_DIR"/steps/*/status 2>/dev/null | wc -l | tr -d ' '; }
+  n_ok=$(count ok) n_skip=$(count skipped) n_bad=$(count 'failed|timeout|crashed')
+  tally="$n_ok ok, $n_skip skipped"
+  [ "$n_bad" -gt 0 ] && tally="$tally, $n_bad failed"
+  [ "$n_absent" -gt 0 ] && tally="$tally, $n_absent need models not on this USB"
+  if [ "$n_bad" -gt 0 ]; then ui_end "$C_WARN" "$G_BAD Done in $(ui_dur $(( $(now_s) - UI_T0 )))" "$tally"
+  else ui_end "$C_OK" "$G_OK Done in $(ui_dur $(( $(now_s) - UI_T0 )))" "$tally"; fi
+  ui_kv results "$RUN_DIR/summary.txt"
+  printf '\n Eject the USB and bring it back.\n'
+fi

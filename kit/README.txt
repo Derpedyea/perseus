@@ -14,9 +14,11 @@ even a short visit gets the key data, and it continues where it stopped.
        cd "/media/$USER/<USB name>/PERSEUS-KIT"
 
 3. Start it. For a 2-hour visit:
-       sudo bash run.sh --for 95
+       sudo bash run.sh --for 95m
    It stops starting new tests after 95 minutes and finishes the one it is
-   on (a few minutes), leaving time to pack up. Phases 1-4 (~60 min) are
+   on (a few minutes), leaving time to pack up. --for also takes hours:
+   --for 8h, --for 1h30m. Overnight, leave it out: it runs every test.
+   sudo bash run.sh --help lists everything it can do. Phases 1-4 (~60 min) are
    the important data; 5-8 are older comparisons and extras.
    Phase 3 uses the graphics card: the screen may stutter for a moment.
    Phase 4 waits until the big model (75.8 GB) is copied off the USB,
@@ -28,11 +30,11 @@ even a short visit gets the key data, and it continues where it stopped.
        sudo bash run.sh stop      stop right now (same as Ctrl-C in its window)
    Don't use the Mac for anything else meanwhile; it skews the numbers.
 
-5. Wait for "Paused", "Stopped", "Time limit ... reached" or "DONE" before
+5. Wait for "Paused", "Stopped", "Time limit ... reached" or "Done" before
    ejecting the USB. Bring it back; everything is in PERSEUS-KIT/results/
    (summary.txt there has the headline numbers).
 
-Next visit: run the same command again (sudo bash run.sh --for 95). It
+Next visit: run the same command again (sudo bash run.sh --for 95m). It
 continues from where it stopped. If a test was cut off by a crash or power
 cut it is skipped, not retried; add --retry-failed to retry it.
 
