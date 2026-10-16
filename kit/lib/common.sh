@@ -10,11 +10,19 @@ now_s() {
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
-log() {
-  local line="[$(date +%H:%M:%S)] $*"
-  echo "$line"
-  [ -n "${RUN_DIR:-}" ] && echo "$line" >> "$RUN_DIR/run.log"
-  return 0
+# log/record (run.log + screen) live in ui.sh.
+
+# "95" (minutes), "90m", "8h" or "1h30m" -> whole minutes. Fails on anything else, on 0 and on
+# more than a week.
+parse_minutes() { # text
+  local h=0 m=0
+  if [[ "$1" =~ ^([0-9]+)m?$ ]]; then m=${BASH_REMATCH[1]}
+  elif [[ "$1" =~ ^([0-9]+)h(([0-9]+)m)?$ ]]; then h=${BASH_REMATCH[1]}; m=${BASH_REMATCH[3]:-0}
+  else return 1; fi
+  [ ${#h} -le 4 ] && [ ${#m} -le 6 ] || return 1  # before the arithmetic can overflow
+  m=$(( 10#$h * 60 + 10#$m ))  # 10#: "08" is not octal
+  [ "$m" -gt 0 ] && [ "$m" -le 10080 ] || return 1
+  echo "$m"
 }
 
 json_str() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n\t' '  '; }
@@ -106,15 +114,22 @@ run_step() {
   case "$prev" in
     ok|skipped) return 0 ;;
     failed|timeout|crashed)
-      if [ "$RETRY_FAILED" != 1 ]; then log "-- $id: previously $prev, not retrying (use --retry-failed)"; return 0; fi ;;
+      if [ "$RETRY_FAILED" != 1 ]; then
+        say "-- $id: previously $prev, not retrying (use --retry-failed)"
+        [ "$UI" = pretty ] && ui_step_line "$prev" "$id" "" "$prev earlier, not retried (--retry-failed retries)"
+        return 0
+      fi ;;
   esac
   rm -rf "$d"; mkdir -p "$d"
   echo "$(ts)" > "$d/started"
   CURRENT_STEP="$id"
   local t0; t0=$(now_s)
-  log ">> $id"
+  STEP_T0=$t0
+  say ">> $id"
+  ui_tick_start "$id"
   local rc=0
   ( STEP_DIR="$d"; export STEP_DIR; "$@" ) < /dev/null > "$d/stdout.txt" 2> "$d/stderr.txt" || rc=$?
+  ui_tick_stop
   local st=ok
   case "$rc" in
     0) st=ok ;;
@@ -125,10 +140,11 @@ run_step() {
   esac
   write_status "$d" "$st" "$rc" "$t0"
   CURRENT_STEP=""
-  local extra=""
-  [ -f "$d/reason" ] && extra=" ($(head -c 160 "$d/reason"))"
-  [ "$st" = failed ] && extra=" (exit $rc; see steps/$id/stderr.txt)"
-  log "   $id: $st in $(fmt_dur $(( $(now_s) - t0 )))$extra"
+  local extra="" note="" took=$(( $(now_s) - t0 ))
+  [ -f "$d/reason" ] && note=$(head -c 160 "$d/reason") && extra=" ($note)"
+  [ "$st" = failed ] && extra=" (exit $rc; see steps/$id/stderr.txt)" && note="exit $rc, see steps/$id/stderr.txt"
+  say "   $id: $st in $(fmt_dur "$took")$extra"
+  [ "$UI" = pretty ] && ui_step_line "$st" "$id" "$took" "$note"
   return 0
 }
 
@@ -141,6 +157,7 @@ write_summary() {
     echo
     local n_absent; n_absent=$(grep -l '^absent$' "$RUN_DIR"/steps/*/status 2>/dev/null | wc -l)
     [ "$n_absent" -gt 0 ] && echo "$n_absent tests need models this USB doesn't carry (status 'absent'); they run on the next 'bash run.sh' once the USB has them." && echo
+    [ -f "${DPM_RECORD:-}" ] && echo "!! The GPU's performance level is still pinned (record: $DPM_RECORD); 'sudo bash run.sh clean' puts it back, or reboot." && echo
     printf '%-46s %-11s %s\n' STEP STATUS NOTE
     for d in "$RUN_DIR"/steps/*/; do
       [ -d "$d" ] || continue
@@ -158,6 +175,7 @@ write_summary() {
     for f in "$RUN_DIR"/steps/*/stdout.txt; do
       grep -q '"avg_ts"' "$f" 2>/dev/null || continue
       local step; step=$(basename "$(dirname "$f")")
+      [ -f "$(dirname "$f")/config.txt" ] && step="$step [$(head -c 20 "$(dirname "$f")/config.txt")]"
       grep '"avg_ts"' "$f" | while read -r line; do
         local th np ng avg
         th=$(echo "$line" | sed -n 's/.*"n_threads": *\([0-9]*\).*/\1/p')
@@ -176,18 +194,34 @@ write_summary() {
     sed -n 's/^picked: /  picked: /p' "$RUN_DIR"/steps/*-gpu-probe/stdout.txt 2>/dev/null
     for f in "$RUN_DIR"/steps/*-gpu-probe/reason; do [ -f "$f" ] && echo "  no GPU: $(head -c 300 "$f")"; done
     grep -h -E '^== |tests passed' "$RUN_DIR"/steps/*-gpu-selftest/stdout.txt 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g; s/^ */  /'
-    if [ -f "$(ls "$RUN_DIR"/steps/*-gpu-op-bench/stdout.txt 2>/dev/null | head -1)" ]; then
-      echo "  Flash-Next decode matmuls on the GPU, slowest first: us per call, GB/s (a tensor small enough to"
-      echo "  stay in the GPU's cache between runs reads faster than VRAM), weight format, tensor"
+    local ob
+    for ob in "$RUN_DIR"/steps/*-gpu-op-bench*/stdout.txt; do
+      [ -f "$ob" ] || continue
+      echo "  $(basename "$(dirname "$ob")"): Flash-Next decode matmuls on the GPU, slowest first: us per call, GB/s,"
+      echo "  weight format, tensor. Over VRAM speed: the tensor stayed in the GPU's cache. A few GB/s: it sat in"
+      echo "  system RAM, read over PCIe (CPU-visible VRAM is 256 MB without Resizable BAR; compare the -novis run)"
       # test-backend-ops colours the GB/s figure even into a file: strip ANSI codes first
-      sed 's/\x1b\[[0-9;]*m//g' "$RUN_DIR"/steps/*-gpu-op-bench/stdout.txt \
+      sed 's/\x1b\[[0-9;]*m//g' "$ob" \
         | sed -n 's/.*MUL_MAT(name=\([^,]*\),type=[^,]*,ne=\[[0-9]*,1,1,1\],.*sources=\([A-Za-z0-9_]*\)\[.*- *\([0-9.]*\) us\/run - .* - *\([0-9.]*\) GB\/s.*/\3 \4 \2 \1/p' \
         | sort -rn | head -15 | awk '{printf "    %9s us %8s GB/s  %-8s %s\n", $1, $2, $3, $4}'
-    fi
+    done
     echo
     echo "== Flash-Next (llama-completion, 128 tokens: cpu-gpu = attention etc. on the GPU, experts on the CPU)"
     grep -H -E 'prompt eval time =|[^t] eval time =|common_params_fit_impl: +- ' "$RUN_DIR"/steps/*-flashnext-cpu-*/stderr.txt 2>/dev/null \
       | sed "s|$RUN_DIR/steps/||; s|/stderr.txt:|: |; s/[0-9.]* I common_params_fit_impl: *- /GPU placement: /"
+    echo
+    echo "== Flash-Next profile (phase 4b; tokens/s are in the llama-bench section)"
+    sed 's/^/  4b-05 /' "$RUN_DIR"/steps/*-fn-pick/stdout.txt 2>/dev/null
+    local gf; gf=$(ls "$RUN_DIR"/steps/*-fn-gpu-op-times/stderr.txt 2>/dev/null | head -1)
+    if [ -n "$gf" ]; then
+      # one "Total time: N us." per graph the GPU ran (a decode token is several graphs)
+      awk '/^Total time: / { n++; us += $3 } END { if (n) printf "  GPU op time, all graphs: %d graphs, %.1f ms (barrier per op: an overstatement)\n", n, us / 1000 }' "$gf"
+    fi
+    local pf; pf=$(ls "$RUN_DIR"/steps/*-fn-cpu-profile/report-sym.txt 2>/dev/null | head -1)
+    if [ -n "$pf" ]; then
+      echo "  CPU profile while generating (perf, all threads), top entries: % of samples, library, function"
+      grep -E '^ +[0-9.]+%' "$pf" | head -15 | sed 's/^ */    /'
+    fi
     echo
     echo "== kernel bench (ns per 256 weights, 1 thread; nc = tokens per weight read)"
     grep -h '^bench ' "$RUN_DIR"/steps/*-kernel-bench/stdout.txt 2>/dev/null | sed 's/^bench /  /'

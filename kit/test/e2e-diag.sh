@@ -34,7 +34,8 @@ RD() { ls -d "$1"/results/*/ | tail -1; }
 st() { cat "$(RD "$1")steps/$2/status" 2>/dev/null || echo none; }
 # step ids of the plan, and the ones whose function needs a model file
 plan_ids() { sed -n 's/^  S \([^ ]*\) .*/\1/p' "$1/run.sh"; }
-model_ids() { sed -n 's/^  S \([^ ]*\) step_\(stage\|sanity\|bench\|mtp\|mtp_mc_off\|bench_tiled_off\|bench_repack_off\|gpu_sanity\|gpu_bench\|flashnext\) .*/\1/p' "$1/run.sh"; }
+# a step whose function (behind step_cfg's config, if any) needs a model
+model_ids() { sed -n 's/^  S \([^ ]*\) \(step_cfg [a-z-]* \)\{0,1\}step_\(stage\|sanity\|bench\|mtp\|mtp_mc_off\|bench_tiled_off\|bench_repack_off\|gpu_sanity\|gpu_bench\|flashnext\|fn_bench\|fn_pick\|fn_profile\) .*/\1/p' "$1/run.sh"; }
 cleanup() { docker rm -f "perseus-e2e-diag-a-$TAG" "perseus-e2e-diag-b-$TAG" >/dev/null 2>&1; rm -rf "$T"; }
 trap cleanup EXIT
 
