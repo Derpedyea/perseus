@@ -1,6 +1,6 @@
 # Lab kit design
 
-**Invariant:** tests run in a fixed priority order (phases 1-8), and every planned step ends with exactly one recorded outcome (`ok`, `skipped` + reason, `absent` + reason, `failed`, `timeout`, `interrupted` or `crashed`), and its raw output sits next to it. Nothing is silently dropped, and the kit never changes the lab machine beyond `/var/tmp/perseus-kit-local` and the page-cache drop in the one `sudo` test.
+**Invariant:** tests run in a fixed priority order (phases 1-4, 4b, 5-8), and every planned step ends with exactly one recorded outcome (`ok`, `skipped` + reason, `absent` + reason, `failed`, `timeout`, `interrupted` or `crashed`), and its raw output sits next to it. Nothing is silently dropped, and the kit never changes the lab machine beyond `/var/tmp/perseus-kit-local`, the page-cache drop in the one `sudo` test, and the GPU's performance level while a phase 4b step pins it (always put back: see Phase 4b).
 
 | Exit | Behaviour | Test |
 |---|---|---|
@@ -64,6 +64,43 @@ The lab box has an AMD RX 580 (Polaris, PCI `1002:67df` rev e7). Flash-Next's pe
 
 Copies others hold: `$RUN_DIR/gpu.env` holds the picked device for the rest of that run (a resumed run reuses it; a new run probes again). The GPU holds nothing between steps (each step is its own process). Mesa's shader cache under the local dir speeds up later steps' pipeline builds and goes with `run.sh clean`.
 
+## Phase 4b: where Flash-Next's CPU+GPU time goes
+
+Run 2 decoded Flash-Next at 278 ms a token on CPU+GPU against a ~85 ms bandwidth ceiling (GPU part ~30 ms, CPU experts ~45-55 ms). 4b splits that time up and A/Bs three free knobs:
+- `novis`: `GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1`. ggml-vulkan asks for CPU-visible VRAM first (`ggml-vulkan-buffers.cpp`, "use rebar if available"). Without Resizable BAR that is 256 MB on the lab box, and the rest spills to system RAM read over PCIe 2.0: run 2's op bench had 8 matmuls at 1-3 GB/s where the same shapes ran at 120-145.
+- `dpm-high`: the GPU's clocks pinned (`power_dpm_force_performance_level=high`). It idles while the CPU runs each layer's experts, and its memory clock idles at 300 MHz.
+- `dio`: weights read into RAM with direct I/O instead of mmap (llama.cpp warns that CPU tensor overrides with mmap are slower).
+
+Every GPU step places the same way, `-ngl 99 -ot exps=CPU`: all but the routed experts on the GPU (5.4 GB of 8). Not `-fit`, because llama-bench frees and reloads the model for every test when fitting, and a fixed split keeps the A/B comparable. 4b-05 picks the fastest decode of 4b-01..04, and the later steps run under that config.
+
+**Invariant:** the GPU's performance level differs from its pre-run value only while a 4b step that pins it runs its benchmark. Every way out of that step puts it back (at the latest when `run.sh` next starts, or on reboot), and no 4b step leaves a process behind.
+
+Ordering rule: a step's own prerequisites (model on this USB, GPU, tools) decide its outcome before its config acts. `step_cfg` only records the config; the clocks are pinned in `note_env`, which every timed step calls right before its command. So a step that can't run never touches the GPU, and a missing model stays `absent` (rerun later), not a final `skipped`. A pinned config whose step never reached `note_env` fails the step instead of reporting unpinned numbers as pinned.
+
+| Exit | Behaviour | Test |
+|---|---|---|
+| pinning step ends (ok, failed, timeout, skipped) | Before the first write, the switch's path and pre-run value go to `$LOCAL/gpu-dpm.restore` (tmp + rename). The runner restores after every step and deletes the record only once the read-back matches | `test/stub-4b.sh` (a): 4b-01 ran at `auto`; 4b-10, after the pinned steps, at `auto`; `auto` and no record after the run. Mutant without the per-step restore fails |
+| pinning while an earlier restore is still owed | the record is written once, so it keeps the true original, not `high` | (h): mutant that re-records every time fails |
+| Ctrl-C / `run.sh stop` mid-step | the INT trap restores before writing the summary; the EXIT trap tries again | (b): exit 130, `interrupted`, `auto`, no record. Mutant without both trap restores fails |
+| pause / time limit | the step that was running ends normally, so it is restored like any other | by construction (`S` restores after `run_step`) |
+| runner killed (-9), crash or power loss mid-step | the level stays `high` and the record stays; the next start restores it before any step, and so does a start that refuses to run (USB read-only or full) unless a live run owns the lock. A reboot resets it anyway | (c): kill -9 of the run's process group, then the next start restores it before 1-01; a refused start restores it too (failed on 83e1506). Mutant without the startup restore fails |
+| restore fails (write error) | the record stays; an `!!` line goes to run.log and the screen; retried after every later step, at exit and at the next start; `clean` refuses to delete the local dir (which holds the record); summary.txt says it's still pinned. While it is owed, every GPU step is deferred (`interrupted` with the reason, rerun by the next run): its numbers would be at the wrong level under the wrong label. CPU-only steps run | (d): read-only switch → `clean` exits 1 and keeps the dir; writable again → `clean` restores, then removes it. (l): 4b-04 and 4b-10 deferred, 4b-12 runs; on 83e1506 4b-10 ran pinned as `novis` |
+| the switch is gone (GPU removed, card renumbered after a reboot) | the setting went with the device: the record is dropped and that is logged | (e) |
+| no sudo, or not exactly one AMD switch in sysfs | pinning steps `skipped` with the reason, nothing written; 4b-05 picks among the rest. The banner warns when not under sudo (run 2 ran as `student`) | (f) |
+| no switch and no model (diag or core kit on a box without the switch) | the model check comes first: `absent`, not `skipped` | (i): failed on a2856c3 (`skipped`) |
+| no decode number from 4b-01..04 although one ran (ok without a number, failed, timeout, crashed) | 4b-05 `failed`; the steps that use its pick are `skipped` ("4b-05 picked no config"), never run as `base` | (g): mutant that falls back to `base` fails |
+| none of 4b-01..04 ran (no GPU picked) | 4b-05 `skipped` (not `failed`): nothing broke, there was nothing to pick from; the `best` steps skip; CPU-only 4b-12 runs | (j): mutant that always fails is caught |
+| Flash-Next not on this USB (diag or core kit) | every 4b step that needs it ends `absent`: 4b-05 and the `best` steps check the model first, so a USB that gets it later runs them. `e2e-diag`'s `model_ids` counts them as model steps (it looks behind `step_cfg`) | (i): absent, then ok once the model is back; mutant without the check leaves them `skipped` (final) |
+| `run.sh status` | it evaluates the plan before setup: everything the plan's arguments call (`fn_threads`, `$NPHYS`, `$NCPUS`) exists by then | (a): status exits 0 with no shell errors and lists 4b; failed on d55a778 (`fn_threads: command not found`) |
+| GPU sampler (busy %, core and memory clock, 5 Hz, `gpu-samples.txt`) | a background loop in the step, stopped when the bench ends. It ignores SIGINT (background jobs do), so it polls its step's pid and state and exits within 0.2 s of the step dying, zombie or not | (b): nothing left after Ctrl-C. Mutant without the poll leaves the loop running |
+| `perf` missing, Ubuntu's wrapper lacks linux-tools for this kernel, or it may not attach to a process (no sudo: `perf_event_paranoid`, Yama) | 4b-09 `skipped` with perf's own message, decided by a 1 s probe that attaches to a `sleep` the way the real run attaches, before Flash-Next loads. `perf record -N`: no build-id cache in root's home | (a); (m): skipped, llama-completion never launched (failed after loading on 83e1506) |
+| perf record fails after writing data | its exit status is checked, not just the file: `failed` | (n): was `ok` on 83e1506 |
+| what 4b-09 profiles | generation only: a background attacher waits for llama-completion's `generate:` line (load and warmup take 30-190 s here, more than the 64 tokens), finds its pid through the step's process tree (`timeout`'s child, so no other llama-completion can match), and runs `perf record -p`, which ends with that process. No pid, or no samples → `failed` with the reason in perf-record.txt | (a): attached after `generate:`; failed on a2856c3 (perf ran from launch) |
+| Ctrl-C during 4b-09 | llama-completion stays in the foreground and gets SIGINT; perf, attached in the background (SIGINT ignored there), ends with it; the attacher's wait loop polls its step and a done flag | (k): `interrupted`, nothing left running |
+| `-lm dio` reads 71 GB into RAM | runs last, since it pushes the mmap steps' page cache out. `ram_check` on both shards as everywhere | by construction (order) |
+
+Copies others hold: the kernel holds the performance level until reboot; `$LOCAL/gpu-dpm.restore` holds the pre-run value until it is put back; `$RUN_DIR/fn-best.env` holds 4b-05's pick for the rest of the run (a resumed run reuses it).
+
 ## Known gaps
 - A step whose command itself exits 3 is recorded as `skipped`: `skip()` and such a command share the exit code. `absent` uses a marker file, so it can't be faked that way.
 - `assemble` never deletes: assembling a smaller tier onto a stick that holds a bigger tier's models leaves them (it logs which), and run.sh uses them.
@@ -75,4 +112,7 @@ Copies others hold: `$RUN_DIR/gpu.env` holds the picked device for the rest of t
 - GPU hang/reset and VRAM taken mid-step by another program are untested; each ends the step `failed` or `timeout` with stderr kept.
 - 3-03's partial-failure check matches the two failure messages in llama.cpp's perf loop (`failed to allocate`, `graph_compute failed`, read from its source); a failing perf case wasn't reproduced here.
 - If the lab box has no Vulkan driver for the GPU (Ubuntu's `mesa-vulkan-drivers` not installed), every GPU step is skipped; the kit does not carry its own driver. sysinfo's `vulkan.txt` will show it, and the next kit can bring one.
+- Phase 4b: if a run is killed mid-pin and the kit never runs again, the GPU stays at `high` until reboot (more power and heat, no harm to results). A `skipped` step is final, so steps skipped for want of 4b-05's pick don't rerun when `--retry-failed` later fixes 4b-05.
+- Phase 4b's wiring is tested with stub binaries and a fake sysfs (`test/stub-4b.sh`); the knobs' real effect, `perf` on the lab's Ubuntu and the Vulkan timer's output are only seen on the lab box.
+- `GGML_VK_PERF_LOGGER` puts a barrier between GPU ops, so 4b-08's sum overstates the GPU's share of a token. Use it for the split between ops, and 4b-01..04 for speed.
 - The Polaris check at home is an approximation: a newer AMD GPU with fp16, integer dot product, cooperative matrix and bf16 turned off in llama.cpp. Polaris-specific driver bugs only show up in 3-02 on the lab box.

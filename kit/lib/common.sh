@@ -157,6 +157,7 @@ write_summary() {
     echo
     local n_absent; n_absent=$(grep -l '^absent$' "$RUN_DIR"/steps/*/status 2>/dev/null | wc -l)
     [ "$n_absent" -gt 0 ] && echo "$n_absent tests need models this USB doesn't carry (status 'absent'); they run on the next 'bash run.sh' once the USB has them." && echo
+    [ -f "${DPM_RECORD:-}" ] && echo "!! The GPU's performance level is still pinned (record: $DPM_RECORD); 'sudo bash run.sh clean' puts it back, or reboot." && echo
     printf '%-46s %-11s %s\n' STEP STATUS NOTE
     for d in "$RUN_DIR"/steps/*/; do
       [ -d "$d" ] || continue
@@ -174,6 +175,7 @@ write_summary() {
     for f in "$RUN_DIR"/steps/*/stdout.txt; do
       grep -q '"avg_ts"' "$f" 2>/dev/null || continue
       local step; step=$(basename "$(dirname "$f")")
+      [ -f "$(dirname "$f")/config.txt" ] && step="$step [$(head -c 20 "$(dirname "$f")/config.txt")]"
       grep '"avg_ts"' "$f" | while read -r line; do
         local th np ng avg
         th=$(echo "$line" | sed -n 's/.*"n_threads": *\([0-9]*\).*/\1/p')
@@ -192,18 +194,34 @@ write_summary() {
     sed -n 's/^picked: /  picked: /p' "$RUN_DIR"/steps/*-gpu-probe/stdout.txt 2>/dev/null
     for f in "$RUN_DIR"/steps/*-gpu-probe/reason; do [ -f "$f" ] && echo "  no GPU: $(head -c 300 "$f")"; done
     grep -h -E '^== |tests passed' "$RUN_DIR"/steps/*-gpu-selftest/stdout.txt 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g; s/^ */  /'
-    if [ -f "$(ls "$RUN_DIR"/steps/*-gpu-op-bench/stdout.txt 2>/dev/null | head -1)" ]; then
-      echo "  Flash-Next decode matmuls on the GPU, slowest first: us per call, GB/s (a tensor small enough to"
-      echo "  stay in the GPU's cache between runs reads faster than VRAM), weight format, tensor"
+    local ob
+    for ob in "$RUN_DIR"/steps/*-gpu-op-bench*/stdout.txt; do
+      [ -f "$ob" ] || continue
+      echo "  $(basename "$(dirname "$ob")"): Flash-Next decode matmuls on the GPU, slowest first: us per call, GB/s,"
+      echo "  weight format, tensor. Over VRAM speed: the tensor stayed in the GPU's cache. A few GB/s: it sat in"
+      echo "  system RAM, read over PCIe (CPU-visible VRAM is 256 MB without Resizable BAR; compare the -novis run)"
       # test-backend-ops colours the GB/s figure even into a file: strip ANSI codes first
-      sed 's/\x1b\[[0-9;]*m//g' "$RUN_DIR"/steps/*-gpu-op-bench/stdout.txt \
+      sed 's/\x1b\[[0-9;]*m//g' "$ob" \
         | sed -n 's/.*MUL_MAT(name=\([^,]*\),type=[^,]*,ne=\[[0-9]*,1,1,1\],.*sources=\([A-Za-z0-9_]*\)\[.*- *\([0-9.]*\) us\/run - .* - *\([0-9.]*\) GB\/s.*/\3 \4 \2 \1/p' \
         | sort -rn | head -15 | awk '{printf "    %9s us %8s GB/s  %-8s %s\n", $1, $2, $3, $4}'
-    fi
+    done
     echo
     echo "== Flash-Next (llama-completion, 128 tokens: cpu-gpu = attention etc. on the GPU, experts on the CPU)"
     grep -H -E 'prompt eval time =|[^t] eval time =|common_params_fit_impl: +- ' "$RUN_DIR"/steps/*-flashnext-cpu-*/stderr.txt 2>/dev/null \
       | sed "s|$RUN_DIR/steps/||; s|/stderr.txt:|: |; s/[0-9.]* I common_params_fit_impl: *- /GPU placement: /"
+    echo
+    echo "== Flash-Next profile (phase 4b; tokens/s are in the llama-bench section)"
+    sed 's/^/  4b-05 /' "$RUN_DIR"/steps/*-fn-pick/stdout.txt 2>/dev/null
+    local gf; gf=$(ls "$RUN_DIR"/steps/*-fn-gpu-op-times/stderr.txt 2>/dev/null | head -1)
+    if [ -n "$gf" ]; then
+      # one "Total time: N us." per graph the GPU ran (a decode token is several graphs)
+      awk '/^Total time: / { n++; us += $3 } END { if (n) printf "  GPU op time, all graphs: %d graphs, %.1f ms (barrier per op: an overstatement)\n", n, us / 1000 }' "$gf"
+    fi
+    local pf; pf=$(ls "$RUN_DIR"/steps/*-fn-cpu-profile/report-sym.txt 2>/dev/null | head -1)
+    if [ -n "$pf" ]; then
+      echo "  CPU profile while generating (perf, all threads), top entries: % of samples, library, function"
+      grep -E '^ +[0-9.]+%' "$pf" | head -15 | sed 's/^ */    /'
+    fi
     echo
     echo "== kernel bench (ns per 256 weights, 1 thread; nc = tokens per weight read)"
     grep -h '^bench ' "$RUN_DIR"/steps/*-kernel-bench/stdout.txt 2>/dev/null | sed 's/^bench /  /'
