@@ -26,19 +26,20 @@ INIT=--init; [ "${E2E_NO_INIT:-0}" = 1 ] && INIT=""
 docker run -d $INIT --memory=10g --memory-swap=10g -e PERSEUS_VARIANT=nehalem --name "$C" --network none -u "$(id -u):$(id -g)" -v "$K:$P" perseus-kit-build:bookworm sleep infinity >/dev/null
 inside "rm -rf '$P'/results/* '$P'/results/.lock"
 
-BONSAI=5-03-bonsai-pq2-all-sockets
+# The longest step that needs no model (~15 s in this container).
+LONG=2-00b-tiled-selftest
 start_probe() { docker exec -d "$C" bash -c "exec setsid sleep 31"; sleep 1; }
 start_probe
 expect "harness: SIGINT not ignored in started process" 0 "$(inside "printf '%d' \$(( 0x\$(grep SigIgn /proc/\$(pgrep -f '^sleep 31' | head -1)/status | awk '{print \$2}') & 2 ))")"
 inside "pkill -f '^sleep 31'"
 # 1) Ctrl-C mid-step: the step becomes 'interrupted', the lock is released, exit code 130.
 start_run --no-copy
-wait_for "ls '$P'/results/*/steps/$BONSAI/started" 900 || bad "never reached $BONSAI"
-sleep 5
+wait_for "ls '$P'/results/*/steps/$LONG/started" 900 || bad "never reached $LONG"
+sleep 3
 inside "kill -INT -\$(pgrep -f '^bash run.sh' | head -1)"
 wait_for "! pgrep -f '^bash run.sh'" 20 || bad "run.sh did not stop within 20 s of SIGINT"
-expect "Ctrl-C stops the benchmark too" none "$(inside "pgrep -f '[l]lama-(bench|completion|speculative)' >/dev/null && echo running || echo none")"
-expect "Ctrl-C marks the running step" interrupted "$(st $BONSAI)"
+expect "Ctrl-C stops the self-test too" none "$(inside "pgrep -f '[t]est-tiled-mulmat' >/dev/null && echo running || echo none")"
+expect "Ctrl-C marks the running step" interrupted "$(st $LONG)"
 expect "Ctrl-C releases the lock" absent "$(inside "[ -d '$P/results/.lock' ] && echo present || echo absent")"
 expect "single-node steps are skipped, not failed" skipped "$(st 1-06-membw-node0-local)"
 expect "summary written on stop" yes "$(inside "[ -f \"\$(ls -d '$P'/results/*/ | tail -1)/summary.txt\" ] && echo yes || echo no")"
@@ -50,7 +51,7 @@ fi
 
 # 2) Rerun resumes the same folder and repeats the interrupted step; a second run is refused.
 start_run --no-copy
-wait_for "ls '$P'/results/*/steps/$BONSAI/started && [ ! -f \"\$(ls -d '$P'/results/*/ | tail -1)/steps/$BONSAI/status\" ]" 120 || bad "interrupted step not rerun"
+wait_for "ls '$P'/results/*/steps/$LONG/started && [ ! -f \"\$(ls -d '$P'/results/*/ | tail -1)/steps/$LONG/status\" ]" 120 || bad "interrupted step not rerun"
 expect "resume reuses one results folder" 1 "$(inside "ls -d '$P'/results/*/ | wc -l")"
 expect "earlier ok steps not rerun" 1 "$(inside "grep -c '>> 1-01-env' \"\$(ls -d '$P'/results/*/ | tail -1)/run.log\"")"
 dup=$(inside "cd '$P' && bash run.sh --no-copy 2>&1; echo rc=\$?" | tail -2 | tr '\n' ' ')
@@ -59,19 +60,19 @@ case "$dup" in *"Another run is active"*rc=1*) ok "duplicate run refused" ;; *) 
 # 3) kill -9 the whole run mid-step (power cut): the step is 'crashed' next time and skipped.
 inside "kill -KILL -\$(pgrep -f '^bash run.sh' | head -1)"
 sleep 2
-expect "kill -9 of the run leaves no benchmark behind" none "$(inside "pgrep -f '[l]lama-(bench|completion|speculative)' >/dev/null && echo running || echo none")"
+expect "kill -9 of the run leaves no self-test behind" none "$(inside "pgrep -f '[t]est-tiled-mulmat' >/dev/null && echo running || echo none")"
 start_run --no-copy
-wait_for "[ -f \"\$(ls -d '$P'/results/*/ | tail -1)/steps/$BONSAI/status\" ]" 60 || bad "no status after crash"
-expect "kill -9 mid-step -> crashed" crashed "$(st $BONSAI)"
+wait_for "[ -f \"\$(ls -d '$P'/results/*/ | tail -1)/steps/$LONG/status\" ]" 60 || bad "no status after crash"
+expect "kill -9 mid-step -> crashed" crashed "$(st $LONG)"
 expect "stale lock taken over" yes "$(inside "grep -q 'was cut off' /tmp/run.out && echo yes || echo no")"
-wait_for "ls '$P'/results/*/steps/7-02-bonsai-pq2-mtp-off/started" 900 || bad "did not move on past the crashed step"
-expect "crashed step not retried" crashed "$(st $BONSAI)"
+wait_for "ls '$P'/results/*/steps/2-00c-kernel-bench/started" 900 || bad "did not move on past the crashed step"
+expect "crashed step not retried" crashed "$(st $LONG)"
 inside "p=\$(pgrep -f '^bash run.sh' | head -1); [ -n \"\$p\" ] && kill -INT -\$p"; wait_for "! pgrep -f '^bash run.sh'" 120
 
 # 4) --retry-failed reruns the crashed step.
 start_run --no-copy --retry-failed
-wait_for "[ ! -f \"\$(ls -d '$P'/results/*/ | tail -1)/steps/$BONSAI/status\" ] && ls '$P'/results/*/steps/$BONSAI/started" 60 \
-  && ok "--retry-failed reruns crashed step" || { bad "--retry-failed did not rerun crashed step"; inside "tail -15 /tmp/run.out; d=\$(ls -d '$P'/results/*/ | tail -1)/steps/$BONSAI; ls -la \"\$d\"; cat \"\$d/status\" \"\$d/reason\" 2>&1"; }
+wait_for "[ ! -f \"\$(ls -d '$P'/results/*/ | tail -1)/steps/$LONG/status\" ] && ls '$P'/results/*/steps/$LONG/started" 60 \
+  && ok "--retry-failed reruns crashed step" || { bad "--retry-failed did not rerun crashed step"; inside "tail -15 /tmp/run.out; d=\$(ls -d '$P'/results/*/ | tail -1)/steps/$LONG; ls -la \"\$d\"; cat \"\$d/status\" \"\$d/reason\" 2>&1"; }
 inside "p=\$(pgrep -f '^bash run.sh' | head -1); [ -n \"\$p\" ] && kill -INT -\$p"; wait_for "! pgrep -f '^bash run.sh'" 120
 
 docker rm -f "$C" >/dev/null

@@ -3,7 +3,8 @@
 # logs everything to results/ on the USB. Usage: bash run.sh --help. Plain-language
 # instructions: README.txt.
 # Tests only: PERSEUS_PAUSE_AFTER=STEP-ID pauses after that step, as 'run.sh pause' would;
-# PERSEUS_SYSFS_DRM=DIR stands in for /sys/class/drm (the GPU's clock switch, lib/gpu.sh).
+# PERSEUS_SYSFS_DRM=DIR stands in for /sys/class/drm (the GPU's clock switch, lib/gpu.sh);
+# PERSEUS_MINUTE_S=N makes a --for minute N seconds long.
 set -u
 
 KIT="$(cd "$(dirname "$0")" && pwd)"
@@ -86,11 +87,6 @@ PROMPT_LONG=$'Here is a quick sort implementation in C++. Just code, no comments
 # Model files the plan uses (catalog with sizes/checksums: models.tsv).
 TINY_Q40=Qwen3.5-0.8B-Q4_0.gguf
 TINY_Q4KM=Qwen3.5-0.8B-Q4_K_M.gguf
-BONSAI=Ternary-Bonsai-2-27B-PQ2_0.gguf
-BONSAI_T=Ternary-Bonsai-2-27B-PTQ1_0.gguf
-SALUKI=Underdog-Saluki-27B-1.0-IQ2-mix.gguf
-Q27=Qwen3.8-27B-Q4_0.gguf
-MTP27=mtp-Qwen3.8-27B-Q4_0.gguf
 FLASHNEXT=Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf
 FLASHNEXT_NGRAM=Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00002-of-00002.gguf
 
@@ -126,7 +122,7 @@ plan() {
   S 2-00c-kernel-bench step_kernel_bench test-ssse3-kernels
   S 2-00d-repack-selftest step_repack_selftest
   S 2-00e-lut-bench step_lut_bench
-  # Flash-Next formats (q6_K, q5_K, iq4_nl, q2_0) + q4_1; q6_K/q5_K/q4_1 run in phase 6's Qwen3.8-27B
+  # Flash-Next formats (q6_K, q5_K, iq4_nl, q2_0) + q4_1
   S 2-00f-flashnext-kernel-selftest step_kernel_selftest test-fn-kernels
   S 2-00g-flashnext-kernel-bench step_kernel_bench test-fn-kernels
   S 2-01-tiny-q4_0-stage step_stage "$TINY_Q40"
@@ -178,62 +174,9 @@ plan() {
   S 4b-12-fn-cpu-only step_fn_bench cpu -p 512 -n 64 -r 2 -t "$NPHYS"
   # last: it reads 71 GB into RAM, which pushes the mmap steps' page cache out
   S 4b-13-fn-load-dio step_cfg best step_fn_bench gpu -p 0 -n 64 -r 3 -t "$NPHYS" -lm dio
-
-  phase 5 "compact 27Bs: Bonsai 2 (PQ2_0) vs Saluki (IQ2-mix)" 25
-  S 5-01-bonsai-pq2-stage step_stage "$BONSAI"
-  S 5-02-bonsai-pq2-sanity step_sanity "$BONSAI"
-  S 5-03-bonsai-pq2-all-sockets step_bench "$BONSAI" all-sockets cores 32 16 2
-  S 5-04-bonsai-pq2-one-socket step_bench "$BONSAI" one-socket cores 32 16 2
-  # Saluki runs on the perseus SSSE3 kernels (kernels/), checked by 2-00 on this CPU.
-  S 5-05-saluki-stage step_stage "$SALUKI"
-  S 5-06-saluki-sanity step_sanity "$SALUKI"
-  S 5-07-saluki-all-sockets step_bench "$SALUKI" all-sockets cores 32 16 2
-  S 5-08-saluki-one-socket step_bench "$SALUKI" one-socket cores 32 16 2
-
-  phase 6 "Qwen3.8-27B Q4_0 reference" 20
-  S 6-01-qwen27-stage step_stage "$Q27"
-  S 6-02-qwen27-sanity step_sanity "$Q27"
-  S 6-03-qwen27-all-sockets step_bench "$Q27" all-sockets cores 32 16 2
-  S 6-04-qwen27-one-socket step_bench "$Q27" one-socket cores 32 16 2
-
-  phase 7 "MTP speculative decoding" 15
-  S 7-01-mtp-head-stage step_stage "$MTP27"
-  S 7-02-bonsai-pq2-mtp-off step_mtp "$BONSAI" "" 0
-  S 7-03-bonsai-pq2-mtp-3 step_mtp "$BONSAI" "$MTP27" 3
-  S 7-04-qwen27-mtp-off step_mtp "$Q27" "" 0
-  S 7-05-qwen27-mtp-3 step_mtp "$Q27" "$MTP27" 3
-  S 7-06-saluki-mtp-off step_mtp "$SALUKI" "" 0
-  S 7-07-saluki-mtp-3 step_mtp "$SALUKI" "$MTP27" 3
-  # A/B: 7-07 verifies 4 tokens per step with the perseus multi-column kernels, this without
-  S 7-08-saluki-mtp-3-mc-off step_mtp_mc_off "$SALUKI" "$MTP27" 3
-
-  phase 8 "extras" 60
-  S 8-01-bonsai-pq2-stock-layout step_bench "$BONSAI" naive cores 32 16 2
-  S 8-02-qwen27-stock-layout step_bench "$Q27" naive cores 32 16 2
-  S 8-03-bonsai-ptq1-stage step_stage "$BONSAI_T"
-  S 8-04-bonsai-ptq1-sanity step_sanity "$BONSAI_T"
-  S 8-05-bonsai-ptq1-all-sockets step_bench "$BONSAI_T" all-sockets cores 32 16 2
-  S 8-06-bonsai-ptq1-one-socket step_bench "$BONSAI_T" one-socket cores 32 16 2
-  S 8-07-bonsai-pq2-hyperthreads step_bench "$BONSAI" all-sockets smt 32 16 2
-  S 8-08-qwen27-hyperthreads step_bench "$Q27" all-sockets smt 32 16 2
-  S 8-09-bonsai-pq2-mtp-2 step_mtp "$BONSAI" "$MTP27" 2
-  S 8-10-qwen27-mtp-2 step_mtp "$Q27" "$MTP27" 2
-  S 8-11-bonsai-pq2-cold-distribute step_bench "$BONSAI" distribute-cold cores 32 16 2
-  S 8-12-qwen27-cold-distribute step_bench "$Q27" distribute-cold cores 32 16 2
-  S 8-13-saluki-stock-layout step_bench "$SALUKI" naive cores 32 16 2
-  # A/B: 5-07's prompt numbers use the tiled matmul (enabled on SSE4.1 by kernels/), this without
-  S 8-14-saluki-tiled-off step_bench_tiled_off "$SALUKI" all-sockets cores 32 16 2
-  # Saluki's IQ kernels are table-lookup heavy: do hyperthreads hide that, and is draft 2 better?
-  S 8-15-saluki-hyperthreads step_bench "$SALUKI" all-sockets smt 32 16 2
-  S 8-16-saluki-mtp-2 step_mtp "$SALUKI" "$MTP27" 2
-  # longer prompts: Saluki on the tiled matmul vs Bonsai (no batched kernel for PQ2_0)
-  S 8-17-saluki-prompt-128 step_bench "$SALUKI" all-sockets cores 128 0 1
-  S 8-18-bonsai-pq2-prompt-128 step_bench "$BONSAI" all-sockets cores 128 0 1
-  # A/B: 5-07 runs Saluki's IQ3_S weights repacked at load (kernels/), this in the file layout
-  S 8-19-saluki-repack-off step_bench_repack_off "$SALUKI" all-sockets cores 32 16 2
 }
 # Background copy order: what the plan needs first.
-PREFETCH_ORDER="$TINY_Q40 $TINY_Q4KM $FLASHNEXT $FLASHNEXT_NGRAM $BONSAI $SALUKI $Q27 $MTP27 $BONSAI_T"
+PREFETCH_ORDER="$TINY_Q40 $TINY_Q4KM $FLASHNEXT $FLASHNEXT_NGRAM"
 
 # ---------- lock owner (shared by run / status / pause / stop) ----------
 # The lock holds "HOST PID PGID". OWNER_* are set by owner_alive.
@@ -393,7 +336,7 @@ on_interrupt() {
 trap on_interrupt INT TERM HUP
 
 DEADLINE=""
-[ -n "$BUDGET_MIN" ] && DEADLINE=$(( $(now_s) + BUDGET_MIN * 60 ))
+[ -n "$BUDGET_MIN" ] && DEADLINE=$(( $(now_s) + BUDGET_MIN * ${PERSEUS_MINUTE_S:-60} ))
 export DEADLINE PAUSE_FLAG
 
 # Clean stop between tests: pause requested or time budget used up.
@@ -752,30 +695,6 @@ step_bench() { # file mode threads n_prompt n_gen reps
   esac
 }
 
-# Same prompt and settings with and without MTP drafting, so the speedup is like-for-like.
-step_mtp() { # file draft_file|"" n_max(0 = MTP off)
-  need_linux_llama
-  need_model "$1"
-  local m="$MP" i="$MI" n="$3" d="" need="${M_SIZE[$MI]}"
-  if [ -n "$2" ]; then
-    need_model "$2"
-    d="$MP"; need=$(( need + ${M_SIZE[$MI]} ))
-  fi
-  ram_check "$need"
-  note_env
-  local wrap=() numa=()
-  if [ "$NODES" -gt 1 ]; then wrap=("$MEMBW" exec --interleave --); numa=(--numa distribute); fi
-  local bdir="$BIN/${M_RUNNER[$i]}/$VARIANT"
-  local gen=(-c 1024 -p "$PROMPT_LONG" -n 128 --temp 0 --top-k 1 --seed 42 -t "$NPHYS")
-  # ${arr[@]+...} keeps bash 3.2 with set -u happy when the array is empty.
-  if [ "$n" = 0 ]; then
-    run_cmd 3600 ${wrap[@]+"${wrap[@]}"} "$bdir/llama-completion" -m "$m" "${gen[@]}" -no-cnv ${numa[@]+"${numa[@]}"} < /dev/null
-  else
-    run_cmd 3600 ${wrap[@]+"${wrap[@]}"} "$bdir/llama-speculative-simple" -m "$m" -md "$d" \
-      --spec-type draft-mtp --spec-draft-n-max "$n" "${gen[@]}" ${numa[@]+"${numa[@]}"} < /dev/null
-  fi
-}
-
 # ---------- GPU (Vulkan build) ----------
 # Ends the step unless this box can start the Vulkan build: it is the nehalem build (SSE4.2), and
 # it links Ubuntu 24.04's glibc (glibc-min: the newest symbol version it uses).
@@ -1098,11 +1017,6 @@ fn_perf_attach() {
   ) > "$STEP_DIR/perf-record.txt" 2>&1 &
   PERF_ATTACH=$!
 }
-
-# A/B variants of the steps above (the kernels/ patches read these at startup)
-step_mtp_mc_off() { export PERSEUS_MC=0; step_mtp "$@"; }
-step_bench_tiled_off() { export GGML_CPU_TILED_MM=0; step_bench "$@"; }
-step_bench_repack_off() { export PERSEUS_REPACK=0; step_bench "$@"; }
 
 # ---------- go ----------
 # A dry pass over the plan for the screen: step count, widest id, steps done on an earlier day.

@@ -187,9 +187,6 @@ write_summary() {
       done
     done
     echo
-    echo "== speculative decoding (MTP steps; mtp-off = plain decoding)"
-    grep -H -E 'decoded .* speed:|accept +=|[^t] eval time =' "$RUN_DIR"/steps/*mtp*/stderr.txt 2>/dev/null | sed "s|$RUN_DIR/steps/||; s|/stderr.txt:|: |"
-    echo
     echo "== GPU"
     sed -n 's/^picked: /  picked: /p' "$RUN_DIR"/steps/*-gpu-probe/stdout.txt 2>/dev/null
     for f in "$RUN_DIR"/steps/*-gpu-probe/reason; do [ -f "$f" ] && echo "  no GPU: $(head -c 300 "$f")"; done

@@ -1,14 +1,9 @@
 # Models the kit can carry. Which tests use which model is the plan in run.sh.
-# tier: diag (no models, ~0.4 GB on the USB) < core (~23 GB) < standard (~41 GB) < full (~117 GB). build-kit.sh copies every row at or below the chosen tier.
-# runner: which llama.cpp build loads it (prism = PrismML fork, needed for PQ2_0/PTQ1_0).
+# tier: diag (no models, ~0.4 GB on the USB) < core (~1.4 GB) < full (~77 GB). build-kit.sh copies every row at or below the chosen tier.
+# runner: which llama.cpp build loads it (bin/<runner>/).
 # Flash-Next is two files: llama.cpp opens -00001-of-00002 and finds -00002 (the n-gram table, identical in every ISTA build) beside it.
 #tier	runner	file	size	sha256	url
 core	stock	Qwen3.5-0.8B-Q4_0.gguf	507154688	444406ddd926550c724ec18d5120a9d40ded44908a063b0e66e9a7e5464c652c	https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_0.gguf
 core	stock	Qwen3.5-0.8B-Q4_K_M.gguf	532517120	bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517	https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf
-core	prism	Ternary-Bonsai-2-27B-PQ2_0.gguf	7206168928	3907dc1658db1f78a9826bf8d5bcb8dc65db0d466388937af57f2294fae62ec1	https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf/resolve/main/Ternary-Bonsai-2-27B-PQ2_0.gguf
-core	prism	Ternary-Bonsai-2-27B-PTQ1_0.gguf	5946648928	53107f530aa52eb00912263ab1ee29bd199261c87cd7b4ad4ca1318c1fe33ee3	https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf/resolve/main/Ternary-Bonsai-2-27B-PTQ1_0.gguf
-core	stock	Underdog-Saluki-27B-1.0-IQ2-mix.gguf	7898369152	4a673518b11b1c4445f9b9a9d3c40356f5ba39f6a6260dcb25f3fbfd475d9efb	https://huggingface.co/ConwayResearch/Underdog-Saluki-27B-1.0/resolve/main/Underdog-Saluki-27B-1.0-IQ2-mix.gguf
-standard	stock	Qwen3.8-27B-Q4_0.gguf	16056478688	ede16c7b36e578ca87a8c70e011e4b4633a32c831c0ce76d0f474582384e671d	https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-Q4_0.gguf
-standard	stock	mtp-Qwen3.8-27B-Q4_0.gguf	1369590656	50d9ce5a6da381bbcfb31061cf73df94a90e6faf8efeddee379a9cb8f1501c6e	https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/MTP/mtp-Qwen3.8-27B-Q4_0.gguf
 full	stock	Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf	47039860096	219ea929900dfa9ef091f3aa473fdba6874b65fcb36526d7d851ac9e95856d15	https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/resolve/main/IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf
 full	stock	Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00002-of-00002.gguf	28800138432	316b46f3a2dbd68c900f43136ab9449f9dcc3725dfd8c794847c204bc161e113	https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/resolve/main/IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00002-of-00002.gguf
