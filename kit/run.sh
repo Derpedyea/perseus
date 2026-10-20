@@ -237,9 +237,13 @@ case "$CMD" in
         local fill=$((n_done * 10 / P_TOTAL))
         [ "$P_SKIP" -gt 0 ] && notes="$P_SKIP skipped"
         [ "$P_ABS" -gt 0 ] && notes="${notes:+$notes, }$P_ABS need models not on this USB"
+        # The line is 65 columns before the notes; notes that don't fit get their own line.
+        local below=""
+        [ $((65 + ${#notes})) -gt "$UI_COLS" ] && below=$notes notes=""
         printf ' %s%s%s %-44s %s%s%s%s%s %2d/%-2d %s%s%s\n' "$c" "$g" "$C_0" "$(ui_fit 44 "$P_TITLE")" \
           "$c" "$(ui_repeat "$fill" "$G_FULL")" "$C_DIM" "$(ui_repeat $((10 - fill)) "$G_EMPTY")" "$C_0" \
           "$n_done" "$P_TOTAL" "$C_DIM" "$notes" "$C_0"
+        [ -n "$below" ] && printf '   %s%s%s\n' "$C_DIM" "$below" "$C_0"
         [ -n "$P_NOW" ] && printf '   %snow%s %s\n' "$C_DIM" "$C_0" "$P_NOW"
         return 0
       fi

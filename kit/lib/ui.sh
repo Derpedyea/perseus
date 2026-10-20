@@ -112,7 +112,7 @@ ui_step_line() { # status id seconds|"" note
   ui_flush_phase
   local dur=""; [ -n "$3" ] && dur=$(ui_dur "$3")
   # 2 + glyph + 1 + id + 1 + counter (3 + 2 * digits) + 1 + duration 6 + 2
-  local room=$((UI_COLS - 16 - UI_IDW - 2 * ${#UI_TOTAL}))
+  local room=$((UI_COLS - 17 - UI_IDW - 2 * ${#UI_TOTAL}))
   printf '  %s%s%s %-*s %s %6s' "$c" "$g" "$C_0" "$UI_IDW" "$2" "$(ui_counter)" "$dur"
   [ -n "$note" ] && printf '  %s%s%s' "$n" "$(ui_fit "$room" "$note")" "$C_0"
   printf '\n'
@@ -134,11 +134,13 @@ ui_tick_start() { # id
     # Narrowed below the line mid-step: clear it and stop redrawing (stty: one process, per resize).
     local e d resized=0
     trap 'resized=1' WINCH
+    # No /proc (macOS): ps, one process a second.
     runner_alive() {
       kill -0 $$ 2>/dev/null || return 1
       local _p _c st=""
-      [ -r /proc/$$/stat ] && read -r _p _c st _ < /proc/$$/stat
-      [ "$st" != Z ]
+      if [ -r /proc/$$/stat ]; then read -r _p _c st _ < /proc/$$/stat
+      else st=$(ps -o stat= -p $$ 2>/dev/null); fi
+      case "$st" in Z*) return 1 ;; esac
     }
     sleep 1
     runner_alive || exit 0

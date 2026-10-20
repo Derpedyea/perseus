@@ -40,6 +40,11 @@ for x in 95 95m 8h 1h30m 08h 0h30m 007m 10080 0 0h 1.5h h 1h30 '' 8H 99999h 1008
 done
 expect "parse_minutes" " 95=95 95m=95 8h=480 1h30m=90 08h=480 0h30m=30 007m=7 10080=10080 0=no 0h=no 1.5h=no h=no 1h30=no =no 8H=no 99999h=no 10081=no" "$res"
 
+# A step note cut to fit: the plan's longest id and step count leave the line at 80 columns.
+. "$KITSRC/lib/ui.sh"
+line=$(UI=pretty UI_COLS=80 UI_IDW=33 UI_TOTAL=71 UI_N=71 ui_step_line skipped "$(ui_repeat 33 i)" "" "$(ui_repeat 99 n)")
+expect "a cut step note fits 80 columns" 80 "${#line}"
+
 "$BK" assemble "$T" diag > "$T/assemble.out" 2>&1 || { cat "$T/assemble.out"; exit 1; }
 K="$T/PERSEUS-KIT"
 mkdir -p "$T/local"
@@ -119,6 +124,9 @@ in_tty /tmp/s.out >/dev/null
 scr=$(inside "cat /tmp/s.out")
 has "status: running phase with a bar" "$ESC[36m▸$ESC[0m 1. machine facts + memory bandwidth" "$scr"
 has "status: the running step" "now$ESC[0m 1-03-membw-1-thread" "$scr"
+# a diag kit's later phases note their absent steps
+has "status: absent steps noted" "need models not on this USB" "$scr"
+expect "status fits 80 columns" "" "$(echo "$scr" | tr -d '\r' | sed "s/$ESC\[[0-9;]*[A-Za-z]//g" | awk 'length > 80')"
 inside "cd '$P' && bash run.sh stop" >/dev/null
 sleep 3
 expect "stop leaves nothing of the run" none "$(inside "pgrep -f '^bash run.sh' >/dev/null && echo running || echo none")"
