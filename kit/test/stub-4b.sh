@@ -22,6 +22,8 @@
 #      and the 'best' steps too, not failed/skipped), e2e-diag's model_ids classifies exactly those;
 #      once it is back they run
 #  (j) no GPU picked: 4b-01..04 skipped, 4b-05 skipped (not failed), CPU-only 4b-12 still runs
+#  (p) keys in the run window (a pty): ? l s m each print their view while 4b-03 runs; p sets the
+#      pause flag, p again clears it
 #  (o) not root, at a terminal: run.sh asks first. Enter (no) starts nothing and prints the sudo
 #      command with the same arguments; y goes on. (Skipped when the tests run as root.)
 # usage: stub-4b.sh            CASES="b c" stub-4b.sh runs only those cases
@@ -371,6 +373,34 @@ has "(o) with the sudo command, same arguments" "sudo bash run.sh --for 95m" "$(
 expect "(o) nothing ran: no step, folder or lock" "none $n0 none" "$(st 4b-01-fn-base) $(ls -d "$K"/results/*/ | wc -l) $([ -d "$K/results/.lock" ] && echo lock || echo none)"
 (cd "$K" && printf 'y\n' | PERSEUS_PAUSE_AFTER=4b-01-fn-base script -qefc "bash run.sh" "$T/o2.out" >/dev/null 2>&1); rc=$?
 expect "(o) y goes on" "0 ok" "$rc $(st 4b-01-fn-base)"
+fi
+
+# ---------- (p) ----------
+if want p; then
+fresh
+rm -f "$T/keys"; mkfifo "$T/keys"
+(cd "$K" && STUB_HANG_PINNED=1 TERM=xterm script -qefc 'stty cols 100; bash run.sh' "$T/p.out" < "$T/keys" >/dev/null 2>&1) &
+pid=$!
+exec 7> "$T/keys"
+[ "$(id -u)" = 0 ] || printf 'y\n' >&7
+seen() { grep -qF -- "$1" "$T/p.out"; }
+press() { printf '%s' "$1" >&7; wait_for "seen '$2'" 10 || bad "(p) key $1: no '$2' on screen"; }
+wait_for "grep -qs 'stub saw' \"\$(rundir)steps/4b-03-fn-dpm-high/stderr.txt\"" 30 || bad "(p) never reached 4b-03's benchmark"
+has "(p) the banner lists the keys" "p pause · s status · l output · m machine · ? keys" "$(cat "$T/p.out")"
+press '?' "keys: p pause"
+press l "output of 4b-03-fn-dpm-high"
+has "(p) l: the test's stderr" "| stub saw: novis=0 level=high" "$(cat "$T/p.out")"
+press s "4b. Flash-Next: where the time goes"
+expect "(p) s: phases only, no second header" 1 "$(grep -c 'perseus lab kit' "$T/p.out")"
+press m "busy 42% · core 1366Mhz · mem 300Mhz · clocks high"
+press p "pausing after this test"
+expect "(p) p sets the pause flag" yes "$([ -f "$K/results/.pause" ] && echo yes || echo no)"
+press p "pause cancelled"
+expect "(p) p again clears it" no "$([ -f "$K/results/.pause" ] && echo yes || echo no)"
+bash "$K/run.sh" stop >/dev/null
+wait_for "! pgrep -f -- '$K/run.sh' >/dev/null" 20 || bad "(p) run did not stop"
+exec 7>&-; wait "$pid"
+expect "(p) nothing left running" none "$(left)"
 fi
 
 # ---------- (h) ----------

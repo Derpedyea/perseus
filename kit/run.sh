@@ -219,7 +219,8 @@ case "$CMD" in
     if [ -f "$RUN_DIR/FINISHED" ]; then state="finished"
     elif owner_alive; then state="running (pid $OWNER_PID)"; [ -f "$PAUSE_FLAG" ] && state="$state, pausing after the current test"
     else state="stopped; '$UI_CMD' continues it"; fi
-    if [ "$UI" = pretty ]; then
+    if [ -n "${PERSEUS_STATUS_BARE:-}" ]; then :  # the run window's s key: phases only
+    elif [ "$UI" = pretty ]; then
       printf ' %sperseus lab kit%s  %s\n   %sstate%s  %s\n\n' "$C_B" "$C_0" "$(basename "$RUN_DIR")" "$C_DIM" "$C_0" "$state"
     else
       echo "run:   $(basename "$RUN_DIR")"
@@ -1083,6 +1084,7 @@ if [ "$UI" = pretty ]; then
   fi
   [ "$UI_DONE" -gt 0 ] && ui_kv resume "$UI_DONE of $UI_TOTAL tests done earlier"
   ui_kv stop "Ctrl-C, or from a second terminal: $UI_CMD pause | stop"
+  [ "$UI_LIVE" = 1 ] && ui_kv keys "$UI_KEYS"
 fi
 if [ "$ON_USB" != 0 ] && [ "$(id -u)" != 0 ]; then
   log "!! no sudo: phase 4b's GPU clock tests and CPU profile will be skipped"

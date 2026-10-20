@@ -126,7 +126,7 @@ run_step() {
   local t0; t0=$(now_s)
   STEP_T0=$t0
   say ">> $id"
-  ui_tick_start "$id"
+  ui_tick_start "$id" "$d"
   local rc=0
   ( STEP_DIR="$d"; export STEP_DIR; "$@" ) < /dev/null > "$d/stdout.txt" 2> "$d/stderr.txt" || rc=$?
   ui_tick_stop
