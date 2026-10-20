@@ -22,6 +22,8 @@
 #      and the 'best' steps too, not failed/skipped), e2e-diag's model_ids classifies exactly those;
 #      once it is back they run
 #  (j) no GPU picked: 4b-01..04 skipped, 4b-05 skipped (not failed), CPU-only 4b-12 still runs
+#  (o) not root, at a terminal: run.sh asks first. Enter (no) starts nothing and prints the sudo
+#      command with the same arguments; y goes on. (Skipped when the tests run as root.)
 # usage: stub-4b.sh            CASES="b c" stub-4b.sh runs only those cases
 set -uo pipefail
 KITSRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -356,6 +358,19 @@ expect "(k) step interrupted" interrupted "$(st 4b-09-fn-cpu-profile)"
 wait_for "[ \"\$(left)\" = none ]" 5
 expect "(k) nothing left running (benchmark, perf, attacher)" none "$(left)"
 expect "(k) level back to auto" auto "$(cat "$DPM")"
+fi
+
+# ---------- (o) ----------
+if want o && [ "$(id -u)" != 0 ]; then
+fresh
+n0=$(ls -d "$K"/results/*/ | wc -l)
+(cd "$K" && printf '\n' | script -qefc "bash run.sh --for 95m" "$T/o1.out" >/dev/null 2>&1); rc=$?
+expect "(o) Enter means no: exit 1" 1 "$rc"
+has "(o) it asks" "Continue without sudo? [y/N]" "$(cat "$T/o1.out")"
+has "(o) with the sudo command, same arguments" "sudo bash run.sh --for 95m" "$(cat "$T/o1.out")"
+expect "(o) nothing ran: no step, folder or lock" "none $n0 none" "$(st 4b-01-fn-base) $(ls -d "$K"/results/*/ | wc -l) $([ -d "$K/results/.lock" ] && echo lock || echo none)"
+(cd "$K" && printf 'y\n' | PERSEUS_PAUSE_AFTER=4b-01-fn-base script -qefc "bash run.sh" "$T/o2.out" >/dev/null 2>&1); rc=$?
+expect "(o) y goes on" "0 ok" "$rc $(st 4b-01-fn-base)"
 fi
 
 # ---------- (h) ----------

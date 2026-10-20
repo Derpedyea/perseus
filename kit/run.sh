@@ -54,6 +54,7 @@ EOF
 # Errors go to stderr, exit 2.
 usage_error() { printf 'run.sh: %s\nRun "%s --help" for usage.\n' "$1" "$UI_CMD" >&2; exit 2; }
 
+RUN_ARGS="$*"  # for the "run it again with sudo" line
 CMD=run BUDGET_SET=0 BUDGET_ARG="" BUDGET_MIN="" RETRY_FAILED=0 NEW_RUN=0 NO_COPY=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -280,6 +281,24 @@ case "$CMD" in
     fi
     exit 0 ;;
 esac
+
+# ---------- run: not under sudo ----------
+# Phase 4b's GPU clock tests and CPU profile need root. Asked at a terminal only (nohup, pipes and
+# tests go on with the warning at the start of the run), and only when the USB carries models (a
+# diag kit has no phase 4b). Nothing is started before the answer; the default is no.
+SUDO_ASKED=0
+if [ "$(id -u)" != 0 ] && [ "$OS" = Linux ] && [ -t 0 ] && [ -t 1 ] && ls "$KIT/models/"*.gguf >/dev/null 2>&1; then
+  SUDO_ASKED=1
+  printf '\n %s!%s %sNot running as root (sudo).%s\n' "$C_WARN" "$C_0" "$C_B" "$C_0"
+  printf '   Phase 4b pins the graphics card'"'"'s clocks and profiles the CPU. Without\n'
+  printf '   sudo those tests are skipped, and they are what this visit is for.\n\n'
+  printf '   Continue without sudo? [y/N] '
+  read -r ans || ans=""
+  case "$ans" in
+    y|Y|yes|Yes|YES) ;;
+    *) printf '\n   Nothing started. Run it again with sudo:\n     sudo bash run.sh%s\n' "${RUN_ARGS:+ $RUN_ARGS}"; exit 1 ;;
+  esac
+fi
 
 # ---------- run: results folder, lock, signals ----------
 # Refusing to start still puts back GPU clocks a cut-off run left pinned (lib/gpu.sh), unless a live
@@ -1066,7 +1085,8 @@ if [ "$UI" = pretty ]; then
   ui_kv stop "Ctrl-C, or from a second terminal: $UI_CMD pause | stop"
 fi
 if [ "$ON_USB" != 0 ] && [ "$(id -u)" != 0 ]; then
-  log "!! not under sudo: phase 4b's GPU clock tests and CPU profile will be skipped. Ctrl-C and run: sudo bash run.sh"
+  log "!! no sudo: phase 4b's GPU clock tests and CPU profile will be skipped"
+  [ "$SUDO_ASKED" = 1 ] || log "!! Ctrl-C and run: sudo bash run.sh${RUN_ARGS:+ $RUN_ARGS}"
 fi
 start_prefetch
 plan
