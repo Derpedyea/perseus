@@ -23,7 +23,8 @@ even a short visit gets the key data, and it continues where it stopped.
    isn't on the Mac's disk from last time.
    Please do use sudo: phase 4b pins the graphics card's clocks for a few
    tests (and puts them back after each one) and profiles the CPU, and both
-   need it. Without sudo those tests are skipped.
+   need it. Without sudo those tests are skipped; started without sudo, it
+   asks first (Enter = no, so you can start it again with sudo).
    Phases 3 and 4b use the graphics card: the screen may stutter for a moment.
    Phase 4 waits until the big model is copied off the USB (about 35 minutes
    on the Mac's USB 2.0 ports; phases 1-3 run meanwhile), unless it is still
