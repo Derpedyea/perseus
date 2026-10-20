@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Phased-run e2e in copy mode (background copier on): status, stop and pause from a second
 # terminal, --for time limit, orphaned copier cleanup after kill -9, clean refusing while running.
+# A core kit's models (1 GB) copy in seconds, so the copier checks allow for one that already ended.
 # Container is memory-capped (12 GB, no swap); the kit's local dir is a fresh host folder.
 # usage: e2e-phases.sh ASSEMBLED_KIT_DIR
 set -uo pipefail
@@ -30,11 +31,11 @@ has "status with no runs" "No runs on this machine yet" "$(kit status)"
 
 # 1) Copy mode: copier runs in the background in plan order; status reports progress.
 start_run
-wait_for "grep -q 'copy Ternary-Bonsai-2-27B-PQ2_0' $RD/prefetch.log" 300 || bad "copier never reached Bonsai"
+wait_for "grep -q 'copy Qwen3.5-0.8B-Q4_0' $RD/prefetch.log" 300 || bad "copier never started"
 s=$(kit status)
 has "status: running" "running (pid" "$s"
-has "status: phase 1 complete" "1. machine facts + memory bandwidth" "$s"
-expect "one copier running" 1 "$(copiers)"
+has "status: phase 1 listed" "1. machine facts + memory bandwidth" "$s"
+expect "at most one copier running" yes "$(c=$(copiers); [ "$c" -le 1 ] && echo yes || echo "no ($c)")"
 has "clean refuses while running" "A run is active" "$(kit clean)"
 
 # 2) stop from a second terminal: runner and copier both gone, current step interrupted.
@@ -44,7 +45,9 @@ sleep 2
 expect "stop kills the copier too" 0 "$(copiers)"
 has "status after stop" "stopped; 'bash run.sh' continues it" "$(kit status)"
 
-# 3) kill -9 the runner while the copier works: the next start kills the orphan copier.
+# 3) kill -9 the runner while the copier works: the next start kills the orphan copier. Without
+# their .ok markers the models are copied again.
+inside "rm -f /var/tmp/perseus-kit-local/models/*.ok"
 start_run
 wait_for "[ -f /var/tmp/perseus-kit-local/models/.copying ]" 120 || bad "copier did not restart"
 inside "kill -KILL -\$(pgrep -f '^bash run.sh' | head -1)"; sleep 2
@@ -55,29 +58,30 @@ sleep 5
 expect "restart leaves exactly one copier (or none if all copied)" yes "$(c=$(copiers); [ "$c" -le 1 ] && echo yes || echo "no ($c)")"
 
 # 4) pause during a model test: that test finishes ok, the run stops cleanly before the next.
-wait_for "ls $RD/steps/5-02-bonsai-pq2-sanity/started" 900 || bad "never reached 5-02"
+wait_for "ls $RD/steps/2-03-tiny-q4_0-bench/started" 900 || bad "never reached 2-03"
 has "pause acknowledged" "will stop after the current test" "$(kit pause)"
 runner_gone 900 || bad "runner did not stop after pause"
-expect "paused test completed normally" ok "$(st 5-02-bonsai-pq2-sanity)"
-expect "next test not started" none "$(inside "[ -f $RD/steps/5-03-bonsai-pq2-all-sockets/started ] && echo started || echo none")"
+expect "paused test completed normally" ok "$(st 2-03-tiny-q4_0-bench)"
+expect "next test not started" none "$(inside "[ -f $RD/steps/2-04-tiny-q4km-stage/started ] && echo started || echo none")"
 has "pause message" "Paused. Results so far are saved" "$(inside 'tail -3 /tmp/run.out')"
 expect "pause flag cleared" absent "$(inside "[ -f '$P/results/.pause' ] && echo present || echo absent")"
 
-# 5) --for 1: no new test starts after 1 minute; whatever was running finishes cleanly.
+# 5) What got copied, in plan order, verified.
+inside "cat $RD/prefetch.log" | grep -E '^\[.*\] copy ' | awk '{print $3}' | uniq | tr '\n' ' '; echo
+expect "tiny Q4_K_M staged + verified" yes "$(inside "[ -f /var/tmp/perseus-kit-local/models/Qwen3.5-0.8B-Q4_K_M.gguf.ok ] && echo yes || echo no")"
+has "bench records the background copy state" "background copy:" "$(inside "cat $RD/steps/2-03-tiny-q4_0-bench/env.txt")"
+expect "one results folder (resumed each time)" 1 "$(inside "ls -d '$P'/results/*/ | wc -l")"
+
+# 6) --for 1 on a fresh run, with 20 s minutes: no new test starts after 20 s; whatever was running
+# finishes cleanly. (Resumed, the rest of a core kit's plan would end before the limit.)
 t0=$(date +%s)
-start_run --for 1
-runner_gone 1500 || bad "runner did not stop under --for 1"
+docker exec -d -e PERSEUS_MINUTE_S=20 "$C" bash -c "cd '$P' && exec setsid bash run.sh --new --for 1 >> /tmp/run.out 2>&1"; sleep 1
+runner_gone 600 || bad "runner did not stop under --for 1"
 el=$(( $(date +%s) - t0 ))
 has "time-limit message" "Time limit (--for 1) reached" "$(inside 'tail -3 /tmp/run.out')"
-expect "ran for at least the minute" yes "$([ "$el" -ge 55 ] && echo yes || echo "no (${el}s)")"
+expect "ran for at least the 20 s" yes "$([ "$el" -ge 19 ] && echo yes || echo "no (${el}s)")"
 expect "nothing left cut off" 0 "$(inside "cd $RD/steps && for d in */; do [ -f \$d/started ] && [ ! -f \$d/status ] && echo \$d; done | wc -l")"
 expect "plan not marked finished" absent "$(inside "[ -f $RD/FINISHED ] && echo present || echo absent")"
-expect "still one results folder (resumed each time)" 1 "$(inside "ls -d '$P'/results/*/ | wc -l")"
-
-# 6) What got copied, in plan order, verified.
-inside "cat $RD/prefetch.log" | grep -E '^\[.*\] copy ' | awk '{print $3}' | uniq | tr '\n' ' '; echo
-expect "Bonsai staged + verified" yes "$(inside "[ -f /var/tmp/perseus-kit-local/models/Ternary-Bonsai-2-27B-PQ2_0.gguf.ok ] && echo yes || echo no")"
-has "bench records the background copy state" "background copy:" "$(inside "cat $RD/steps/5-03-bonsai-pq2-all-sockets/env.txt")"
 
 docker rm -f "$C" >/dev/null
 rm -rf "$LD"

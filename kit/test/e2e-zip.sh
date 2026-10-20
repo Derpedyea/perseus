@@ -29,7 +29,7 @@ expect "no symlinks" 0 "$(unzip -Zl "$ZIP" | grep -c '^l')"
 mkdir -p "$T/x" && (cd "$T/x" && unzip -q "$ZIP")
 P=/x/PERSEUS-KIT
 # read the plan now: after chmod -R a-x only root (the container) can enter these directories
-models=$(sed -n 's/^  S \([^ ]*\) step_\(stage\|sanity\|bench\|mtp\|mtp_mc_off\|bench_tiled_off\|bench_repack_off\) .*/\1/p' "$T/x/PERSEUS-KIT/run.sh")
+models=$(sed -n 's/^  S \([^ ]*\) step_\(stage\|sanity\|bench\) .*/\1/p' "$T/x/PERSEUS-KIT/run.sh")
 diag=$(sed -n 's/^  S \([12]-[^ ]*\) .*/\1/p' "$T/x/PERSEUS-KIT/run.sh" | grep -vxF -f <(echo "$models"))
 expect "plan read (phase 1-2 diagnostic steps)" yes "$([ "$(echo "$diag" | wc -w)" -ge 10 ] && echo yes || echo "no: $diag")"
 docker rm -f "$C" >/dev/null 2>&1

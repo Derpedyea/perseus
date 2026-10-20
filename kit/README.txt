@@ -18,11 +18,9 @@ even a short visit gets the key data, and it continues where it stopped.
    It stops starting new tests after 95 minutes and finishes the one it is
    on (a few minutes), leaving time to pack up. --for also takes hours:
    --for 8h, --for 1h30m. Overnight, leave it out: it runs every test.
-   sudo bash run.sh --help lists everything it can do. Phases 1-4b are the
-   important data: about 1 hour, plus ~30 minutes if the big model (75.8 GB)
-   isn't on the Mac's disk from last time. Phases 5-8 are older comparisons
-   whose models aren't on this USB any more; they show as "need models not
-   on this USB" and take no time.
+   sudo bash run.sh --help lists everything it can do. A whole run (phases
+   1-4b) takes about 1 hour, plus ~30 minutes if the big model (75.8 GB)
+   isn't on the Mac's disk from last time.
    Please do use sudo: phase 4b pins the graphics card's clocks for a few
    tests (and puts them back after each one) and profiles the CPU, and both
    need it. Without sudo those tests are skipped.
@@ -47,8 +45,7 @@ cut it is skipped, not retried; add --retry-failed to retry it.
 
 Disk use: models are copied in the background to /var/tmp/perseus-kit-local
 on the Mac's disk, because USB 2.0 is too slow to load them from repeatedly:
-22.1 GB for the core kit, 39.5 GB for standard, 115.3 GB for full, plus
-~0.4 GB of programs.
+1.0 GB for the core kit, 76.9 GB for full, plus ~0.4 GB of programs.
 Each copy starts only if the disk has the model's size + 5 GB free; otherwise
 that model runs straight from the USB (slow loads). Delete them when you're
 completely done:

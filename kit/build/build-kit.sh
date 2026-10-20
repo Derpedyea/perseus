@@ -2,16 +2,16 @@
 # Builds the offline lab kit on a machine WITH internet. Everything heavy lives in $WORK
 # (default ~/.cache/perseus-kit), never in the repo.
 #
-#   build-kit.sh src                 clone/refresh llama.cpp (stock) + PrismML fork (prism branch)
-#   build-kit.sh binaries            static, old-CPU-safe binaries for every fork x ISA variant (Docker),
+#   build-kit.sh src                 clone/refresh llama.cpp
+#   build-kit.sh binaries            static, old-CPU-safe binaries for every ISA variant (Docker),
 #                                    plus a Vulkan build (nehalem) for the lab's GPU
 #   build-kit.sh test                run the binaries under QEMU as Penryn/Nehalem CPUs, incl. negative controls
-#   build-kit.sh models [TIER]       download + sha256-verify models up to TIER (diag|core|standard|full), resumable
+#   build-kit.sh models [TIER]       download + sha256-verify models up to TIER (diag|core|full), resumable
 #   build-kit.sh assemble DEST [TIER]  write DEST/PERSEUS-KIT (scripts, binaries, GPU op lists, models, MANIFEST.json)
 #   build-kit.sh zip OUT.zip         the diag kit (assemble ... diag) as one zip: PERSEUS-KIT/ at the top
 # Tiers: diag = no models (machine facts, memory bandwidth, CPU kernel + GPU checks; FAT32 is fine),
-#        core = + the compact 27Bs (22.1 GB of models), standard = + Qwen3.8-27B Q4_0 and its MTP head (39.5 GB),
-#        full = + Qwen3.8-Flash-Next IQ3_XXS (115.3 GB).
+#        core = + the tiny Qwen3.5-0.8B pair (1.0 GB of models), full = + Qwen3.8-Flash-Next IQ3_XXS (76.9 GB).
+#        Default: full.
 set -euo pipefail
 
 KIT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,7 +19,7 @@ KERNELS="$(cd "$KIT/../kernels" && pwd)"
 WORK="${PERSEUS_KIT_WORK:-$HOME/.cache/perseus-kit}"
 IMAGE=perseus-kit-build:bookworm
 IMAGE_VK=perseus-kit-build-vk:noble
-FORKS="stock prism"
+FORKS="stock"
 VARIANTS="penryn nehalem haswell"
 TARGETS="llama-bench llama-completion llama-speculative-simple llama-cli"
 # The Vulkan build ships these; test-export-graph-ops stays here (it writes the GPU op lists).
@@ -30,7 +30,7 @@ GPU_OP_MODELS="Qwen3.5-0.8B-Q4_0.gguf Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-o
 die() { echo "build-kit: $*" >&2; exit 1; }
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 
-tier_rank() { case "$1" in diag) echo 0 ;; core) echo 1 ;; standard) echo 2 ;; full) echo 3 ;; *) die "unknown tier '$1' (diag|core|standard|full)" ;; esac; }
+tier_rank() { case "$1" in diag) echo 0 ;; core) echo 1 ;; full) echo 2 ;; *) die "unknown tier '$1' (diag|core|full)" ;; esac; }
 
 # Emits "tier runner file size sha url" rows at or below TIER.
 model_rows() {
@@ -50,7 +50,7 @@ in_docker() { in_image "$IMAGE" "$1"; }
 cmd_src() {
   mkdir -p "$WORK/src"
   local name url branch
-  for spec in "stock https://github.com/ggml-org/llama.cpp.git master" "prism https://github.com/PrismML-Eng/llama.cpp.git prism"; do
+  for spec in "stock https://github.com/ggml-org/llama.cpp.git master"; do
     read -r name url branch <<<"$spec"
     local dir="$WORK/src/llama.cpp-$name"
     if [ -d "$dir/.git" ]; then
@@ -81,7 +81,7 @@ march_flags() {
 }
 
 cmd_binaries() {
-  [ -d "$WORK/src/llama.cpp-stock" ] && [ -d "$WORK/src/llama.cpp-prism" ] || die "run '$0 src' first"
+  [ -d "$WORK/src/llama.cpp-stock" ] || die "run '$0 src' first"
   log "building Docker image $IMAGE"
   docker build -q -t "$IMAGE" "$KIT/build" >/dev/null
   mkdir -p "$WORK/bin" "$WORK/build"
@@ -197,7 +197,7 @@ qemu_exit_vk() { # cpu binary args...
 
 cmd_test() {
   local f
-  for f in Qwen3.5-0.8B-Q4_0 Qwen3.5-0.8B-Q4_K_M Ternary-Bonsai-2-27B-PQ2_0 Ternary-Bonsai-2-27B-PTQ1_0 Underdog-Saluki-27B-1.0-IQ2-mix; do
+  for f in Qwen3.5-0.8B-Q4_0 Qwen3.5-0.8B-Q4_K_M; do
     [ -f "$WORK/models/$f.gguf" ] || die "need $f.gguf (run '$0 models core')"
   done
   local fails=0
@@ -237,9 +237,6 @@ cmd_test() {
     check "stock $build Q4_0 bench on $cpu"   0 "$(qemu_exit "$cpu" /work/bin/stock/$build/llama-bench $(bench Qwen3.5-0.8B-Q4_0))"
     check "stock $build Q4_K_M bench on $cpu" 0 "$(qemu_exit "$cpu" /work/bin/stock/$build/llama-bench $(bench Qwen3.5-0.8B-Q4_K_M))"
     check "stock $build completion on $cpu"   0 "$(qemu_exit "$cpu" /work/bin/stock/$build/llama-completion -m /work/models/Qwen3.5-0.8B-Q4_0.gguf -p hello -n 4 --temp 0 -no-cnv -t 4)"
-    check "prism $build PQ2_0 bench on $cpu"  0 "$(qemu_exit "$cpu" /work/bin/prism/$build/llama-bench $(bench Ternary-Bonsai-2-27B-PQ2_0))"
-    check "prism $build PTQ1_0 bench on $cpu" 0 "$(qemu_exit "$cpu" /work/bin/prism/$build/llama-bench $(bench Ternary-Bonsai-2-27B-PTQ1_0))"
-    check "stock $build Saluki IQ-mix bench on $cpu" 0 "$(qemu_exit "$cpu" /work/bin/stock/$build/llama-bench $(bench Underdog-Saluki-27B-1.0-IQ2-mix))"
   done
   # 4) The Vulkan build's CPU code (its own toolchain) on the lab's CPU generation; no GPU here,
   # so -dev none: every op runs on the CPU, perseus kernels included.
@@ -249,7 +246,7 @@ cmd_test() {
 }
 
 cmd_models() {
-  local tier="${1:-standard}"
+  local tier="${1:-full}"
   [ "$(tier_rank "$tier")" -gt 0 ] || { log "tier $tier carries no models: nothing to download"; return 0; }
   mkdir -p "$WORK/models"
   local failed=0
@@ -271,23 +268,26 @@ cmd_models() {
 }
 
 cmd_assemble() {
-  local dest="${1:-}" tier="${2:-standard}"
-  [ -n "$dest" ] && [ -d "$dest" ] || die "usage: $0 assemble DEST_DIR [diag|core|standard|full] (DEST must exist, e.g. the mounted USB)"
+  local dest="${1:-}" tier="${2:-full}"
+  [ -n "$dest" ] && [ -d "$dest" ] || die "usage: $0 assemble DEST_DIR [diag|core|full] (DEST must exist, e.g. the mounted USB)"
   tier_rank "$tier" >/dev/null
   [ -d "$WORK/bin/stock" ] || die "no binaries in $WORK/bin; run '$0 binaries'"
   local out="$dest/PERSEUS-KIT"
-  local need=0
+  local need=0 big=0
   while IFS=$'\t' read -r _t _r file size _s _u; do
     [ -f "$WORK/models/$file.sha256ok" ] || die "model $file missing or unverified; run '$0 models $tier'"
     need=$((need + size))
+    [ "$size" -lt 4294967296 ] || big=1
   done < <(model_rows "$tier")
+  # Only what the kit runs: $WORK/bin may still hold builds of forks the kit no longer uses.
+  local bins="$FORKS stock-vk tools" b
   # + binaries + results: run.sh refuses to start with under 200 MB free; a full run's results are a few MB
-  need=$((need + $(du -sb "$WORK/bin" | cut -f1) + 300000000))
+  need=$((need + $(cd "$WORK/bin" && du -scb $bins 2>/dev/null | tail -1 | cut -f1) + 300000000))
   local fs; fs=$(stat -f -c %T "$dest")
-  # FAT32 can't hold files over 4 GB (every model tier has some). The diag kit has none, and
-  # nothing executes from the USB (run.sh copies bin/ to the local disk and chmods it there), so
-  # udisks' vfat default 'showexec' (no +x on extensionless files) doesn't matter: kit/test/e2e-diag.sh.
-  case "$fs" in msdos|vfat|fat) [ "$tier" = diag ] || die "$dest is FAT ($fs): files over 4 GB won't fit. Format the USB as exFAT or ext4 (or assemble the diag tier)." ;; esac
+  # FAT32 can't hold files over 4 GB (Flash-Next's). Nothing executes from the USB (run.sh copies
+  # bin/ to the local disk and chmods it there), so udisks' vfat default 'showexec' (no +x on
+  # extensionless files) doesn't matter: kit/test/e2e-diag.sh.
+  case "$fs" in msdos|vfat|fat) [ "$big" = 0 ] || die "$dest is FAT ($fs): files over 4 GB won't fit. Format the USB as exFAT or ext4 (or assemble the diag or core tier)." ;; esac
   local free; free=$(( $(stat -f -c '%a * %S' "$dest") ))
   [ "$free" -ge "$need" ] || die "$dest has $((free / 1000000)) MB free, kit needs $((need / 1000000)) MB"
 
@@ -296,7 +296,7 @@ cmd_assemble() {
   cp "$KIT/run.sh" "$KIT/README.txt" "$KIT/models.tsv" "$out/"
   cp "$KIT/lib/"*.sh "$out/lib/"
   cp "$KIT/src/membw.c" "$out/src/"
-  cp -r "$WORK/bin/." "$out/bin/"
+  for b in $bins; do if [ -d "$WORK/bin/$b" ]; then cp -r "$WORK/bin/$b" "$out/bin/"; fi; done
   gpu_ops_into "$out/gpu-ops"
   while IFS=$'\t' read -r _t _r file size _s _u; do
     if [ -f "$out/models/$file" ] && [ "$(stat -c %s "$out/models/$file")" = "$size" ]; then log "have  $file"; continue; fi
@@ -308,7 +308,6 @@ cmd_assemble() {
   {
     printf '{\n  "built_at": "%s",\n  "tier": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tier"
     printf '  "stock_commit": "%s",\n' "$(git -C "$WORK/src/llama.cpp-stock" rev-parse HEAD)"
-    printf '  "prism_commit": "%s",\n' "$(git -C "$WORK/src/llama.cpp-prism" rev-parse HEAD)"
     printf '  "stock_patch": "kernels/apply_ssse3.py sha256 %s, kernels/apply_ssse3_fn.py sha256 %s, kernels/apply_tiled_sse.py sha256 %s",\n' \
       "$(sha256sum "$KERNELS/apply_ssse3.py" | cut -d' ' -f1)" "$(sha256sum "$KERNELS/apply_ssse3_fn.py" | cut -d' ' -f1)" \
       "$(sha256sum "$KERNELS/apply_tiled_sse.py" | cut -d' ' -f1)"
@@ -339,7 +338,7 @@ case "${1:-}" in
   src) cmd_src ;;
   binaries) cmd_binaries ;;
   test) cmd_test ;;
-  models) cmd_models "${2:-standard}" ;;
+  models) cmd_models "${2:-full}" ;;
   assemble) shift; cmd_assemble "$@" ;;
   zip) cmd_zip "${2:-}" ;;
   *) sed -n '2,14p' "$0"; exit 2 ;;
