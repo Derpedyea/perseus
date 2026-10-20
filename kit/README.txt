@@ -30,7 +30,9 @@ even a short visit gets the key data, and it continues where it stopped.
    on the Mac's USB 2.0 ports; phases 1-3 run meanwhile), unless it is still
    on the Mac's disk.
 
-4. While it runs, from a second terminal (same folder, also with sudo):
+4. While it runs, keys in its window: p pause after this test (p again
+   cancels), s status, l the test's last output lines, m CPU/RAM/GPU now,
+   ? the keys. Or from a second terminal (same folder, also with sudo):
        sudo bash run.sh status    how far it is
        sudo bash run.sh pause     finish the current test, then stop
        sudo bash run.sh stop      stop right now (same as Ctrl-C in its window)
