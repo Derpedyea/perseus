@@ -26,7 +26,8 @@ set -u
 # Stop at the first thing missing. bash goes on past a '.' it can't read; without lib/ every test
 # would then end in "command not found".
 start_error() { # what detail
-  printf 'run.sh: %s\n  %s\n  running as %s, in %s\n' "$1" "$2" "$(id -un 2>/dev/null || echo "uid $(id -u)")" "$PWD" >&2
+  local who; who=$(id -un 2>/dev/null) || who="uid $EUID"  # id may be what's missing
+  printf 'run.sh: %s\n  %s\n  running as %s, in %s\n' "$1" "$2" "$who" "$PWD" >&2
   exit 1
 }
 # Every command the runner itself uses. One that only a single test needs (perf, pgrep) can only
@@ -38,13 +39,14 @@ for c in awk basename cat chmod cp cut date df dirname env grep head id ls mkdir
 done
 [ -z "$missing" ] || start_error "these commands aren't found:$missing" "PATH is $PATH"
 KIT="$(cd "$(dirname "$0")" && pwd)" || start_error "can't find the kit folder ('$0')" "Run it from the PERSEUS-KIT folder: sudo bash run.sh"
-# Each lib's last line sets LIB_END to its name: a copy cut short anywhere doesn't.
+# Each lib's last line sets LIB_END to its name: a copy cut short anywhere doesn't. A cut inside a
+# function is a syntax error, which ends the '.' there; bash's own message is left out for ours.
 for lib in common ui gpu; do
   [ -r "$KIT/lib/$lib.sh" ] \
     || start_error "can't read $KIT/lib/$lib.sh" "Copy the whole PERSEUS-KIT folder from the USB again (lib/ belongs next to run.sh)."
   LIB_END=""
-  . "$KIT/lib/$lib.sh"
-  [ "$LIB_END" = "$lib" ] || start_error "$KIT/lib/$lib.sh is incomplete" "Copy the whole PERSEUS-KIT folder from the USB again."
+  . "$KIT/lib/$lib.sh" 2>/dev/null
+  [ "$LIB_END" = "$lib" ] || start_error "$KIT/lib/$lib.sh is incomplete or damaged" "Copy the whole PERSEUS-KIT folder from the USB again."
 done
 unset lib missing c LIB_END SYS_PATH
 

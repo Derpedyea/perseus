@@ -429,6 +429,11 @@ sed '/^write_summary() {/,$d' "$S/lib/common.sh.gone" > "$S/lib/common.sh"
 out=$(cd "$S" && bash run.sh --no-copy 2>&1); rc=$?
 expect "(s) lib/common.sh cut short: exit 1, before any test" "1 none" "$rc $([ -d "$S/results" ] && echo made || echo none)"
 has "(s) says which file is incomplete" "$S/lib/common.sh is incomplete" "$out"
+# cut inside a function: a syntax error, reported as the same one message
+{ sed '/^run_step() {/,$d' "$S/lib/common.sh.gone"; sed -n '/^run_step() {/,/^}/p' "$S/lib/common.sh.gone" | head -5; } > "$S/lib/common.sh"
+out=$(cd "$S" && bash run.sh --no-copy 2>&1); rc=$?
+expect "(s) cut inside a function: exit 1 and only the kit's message" "1 0" "$rc $(echo "$out" | grep -c -v -e '^run.sh: ' -e '^  ')"
+has "(s) naming the file" "$S/lib/common.sh is incomplete" "$out"
 fi
 
 # ---------- (h) ----------
