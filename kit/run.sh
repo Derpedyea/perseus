@@ -29,6 +29,14 @@ start_error() { # what detail
   printf 'run.sh: %s\n  %s\n  running as %s, in %s\n' "$1" "$2" "$(id -un 2>/dev/null || echo "uid $(id -u)")" "$PWD" >&2
   exit 1
 }
+# Every command the runner itself uses. One that only a single test needs (perf, pgrep) can only
+# skip or fail that test.
+missing=""
+for c in awk basename cat chmod cp cut date df dirname env grep head id ls mkdir mv nice rm sed sh \
+         sleep sort stat tail touch tr uname wc; do
+  command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
+done
+[ -z "$missing" ] || start_error "these commands aren't found:$missing" "PATH is $PATH"
 KIT="$(cd "$(dirname "$0")" && pwd)" || start_error "can't find the kit folder ('$0')" "Run it from the PERSEUS-KIT folder: sudo bash run.sh"
 # Each lib's last line sets LIB_END to its name: a copy cut short anywhere doesn't.
 for lib in common ui gpu; do
@@ -38,11 +46,6 @@ for lib in common ui gpu; do
   . "$KIT/lib/$lib.sh"
   [ "$LIB_END" = "$lib" ] || start_error "$KIT/lib/$lib.sh is incomplete" "Copy the whole PERSEUS-KIT folder from the USB again."
 done
-missing=""
-for c in awk sed grep cut tr date df cp mv rm mkdir stat sort head tail wc uname id sleep; do
-  command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
-done
-[ -z "$missing" ] || start_error "these commands aren't found:$missing" "PATH is $PATH"
 unset lib missing c LIB_END SYS_PATH
 
 # Fixed path (not $HOME) so 'sudo bash run.sh' and 'bash run.sh clean' agree on it.
