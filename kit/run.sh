@@ -5,12 +5,38 @@
 # Tests only: PERSEUS_PAUSE_AFTER=STEP-ID pauses after that step, as 'run.sh pause' would;
 # PERSEUS_SYSFS_DRM=DIR stands in for /sys/class/drm (the GPU's clock switch, lib/gpu.sh);
 # PERSEUS_MINUTE_S=N makes a --for minute N seconds long.
+
+# Started by another shell ('sudo sh run.sh': dash on Ubuntu, bash in POSIX mode elsewhere):
+# everything below is plain bash. Plain sh until this line.
+case "${BASH_VERSION:-}:${SHELLOPTS:-}" in
+  :*|*posix*) unset POSIXLY_CORRECT; exec bash "$0" "$@" ;;
+esac
 set -u
 
-KIT="$(cd "$(dirname "$0")" && pwd)"
-. "$KIT/lib/common.sh"
-. "$KIT/lib/ui.sh"
-. "$KIT/lib/gpu.sh"
+# sudo swaps PATH for its secure_path, which a box's sudoers can trim: the system's own directories
+# go last, so nothing earlier in PATH (the tests' stubs) is shadowed.
+PATH="${PATH:+$PATH:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH
+
+# Stop at the first thing missing. bash goes on past a '.' it can't read; without lib/ every test
+# would then end in "command not found".
+start_error() { # what detail
+  printf 'run.sh: %s\n  %s\n  running as %s, in %s\n' "$1" "$2" "$(id -un 2>/dev/null || echo "uid $(id -u)")" "$PWD" >&2
+  exit 1
+}
+KIT="$(cd "$(dirname "$0")" && pwd)" || start_error "can't find the kit folder ('$0')" "Run it from the PERSEUS-KIT folder: sudo bash run.sh"
+for lib in common ui gpu; do
+  [ -r "$KIT/lib/$lib.sh" ] \
+    || start_error "can't read $KIT/lib/$lib.sh" "Copy the whole PERSEUS-KIT folder from the USB again (lib/ belongs next to run.sh)."
+  . "$KIT/lib/$lib.sh"
+done
+declare -F run_step ui_init dpm_restore >/dev/null || start_error "the scripts in $KIT/lib are incomplete" "Copy the whole PERSEUS-KIT folder from the USB again."
+missing=""
+for c in awk sed grep cut tr date df cp mv rm mkdir stat sort head tail wc uname id sleep; do
+  command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
+done
+[ -z "$missing" ] || start_error "these commands aren't found:$missing" "PATH is $PATH"
+unset lib missing c
 
 # Fixed path (not $HOME) so 'sudo bash run.sh' and 'bash run.sh clean' agree on it.
 LOCAL="${PERSEUS_LOCAL:-/var/tmp/perseus-kit-local}"
