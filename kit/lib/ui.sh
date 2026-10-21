@@ -270,3 +270,5 @@ ui_kv() { printf '   %s%-7s%s %s\n' "$C_DIM" "$1" "$C_0" "$2"; }
 ui_end() { # colour headline detail
   printf '\n %s%s%s%s  %s\n' "$C_B" "$1" "$2" "$C_0" "$3"
 }
+
+LIB_END=ui  # last line: run.sh checks it to catch a copy cut short

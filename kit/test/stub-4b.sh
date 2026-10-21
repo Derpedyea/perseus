@@ -24,8 +24,9 @@
 #  (j) no GPU picked: 4b-01..04 skipped, 4b-05 skipped (not failed), CPU-only 4b-12 still runs
 #  (p) keys in the run window (a pty): ? l s m each print their view while 4b-03 runs; p sets the
 #      pause flag, p again clears it
-#  (s) start-up: 'sh run.sh' re-runs itself in bash; a PATH without /usr/bin etc. still works;
-#      an unreadable lib/common.sh stops it with one message naming the file, before any test
+#  (s) start-up: 'sh run.sh' re-runs itself in bash; a PATH without /usr/bin etc. still works, with
+#      sh too; an unreadable or cut-short lib/common.sh stops it with one message naming the file,
+#      before any test
 #  (o) not root, at a terminal: run.sh asks first. Enter (no) starts nothing and prints the sudo
 #      command with the same arguments; y goes on. (Skipped when the tests run as root.)
 # usage: stub-4b.sh            CASES="b c" stub-4b.sh runs only those cases
@@ -414,6 +415,8 @@ has "(s) sh: the whole plan" "4b. Flash-Next: where the time goes" "$out"
 expect "(s) sh: no shell errors" "" "$(echo "$out" | grep -iE 'syntax error|not found|unbound')"
 out=$(cd "$K" && PATH=/nonexistent "$BASH" run.sh status 2>&1); rc=$?
 expect "(s) a PATH without the system's directories (a trimmed sudo secure_path)" "0 " "$rc $(echo "$out" | grep -iE 'not found')"
+out=$(cd "$K" && PATH=/nonexistent /bin/sh run.sh status 2>&1); rc=$?
+expect "(s) both: sh finds bash to re-run in" "0 " "$rc $(echo "$out" | grep -iE 'not found')"
 S="$T/s-kit"; rm -rf "$S"; cp -a "$K" "$S"; rm -rf "$S/results"
 mv "$S/lib/common.sh" "$S/lib/common.sh.gone"
 out=$(cd "$S" && bash run.sh --no-copy 2>&1); rc=$?
@@ -421,6 +424,11 @@ expect "(s) lib/common.sh unreadable: exit 1" 1 "$rc"
 has "(s) says which file" "can't read $S/lib/common.sh" "$out"
 expect "(s) and stops there: no 'command not found', no results folder" "0 none" \
   "$(echo "$out" | grep -c 'not found') $([ -d "$S/results" ] && echo made || echo none)"
+# cut short right after run_step: valid bash, but write_summary and the rest are gone
+sed '/^write_summary() {/,$d' "$S/lib/common.sh.gone" > "$S/lib/common.sh"
+out=$(cd "$S" && bash run.sh --no-copy 2>&1); rc=$?
+expect "(s) lib/common.sh cut short: exit 1, before any test" "1 none" "$rc $([ -d "$S/results" ] && echo made || echo none)"
+has "(s) says which file is incomplete" "$S/lib/common.sh is incomplete" "$out"
 fi
 
 # ---------- (h) ----------

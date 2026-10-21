@@ -6,17 +6,22 @@
 # PERSEUS_SYSFS_DRM=DIR stands in for /sys/class/drm (the GPU's clock switch, lib/gpu.sh);
 # PERSEUS_MINUTE_S=N makes a --for minute N seconds long.
 
+# Plain sh down to the 'exec bash' below (it may be dash).
+# sudo swaps PATH for its secure_path, which a box's sudoers can trim, so the system's own
+# directories are appended: last, so nothing earlier (the tests' stubs) is shadowed; before the
+# exec, which needs them to find bash; once, as the exec'd bash runs this again.
+SYS_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+case ":${PATH:-}:" in
+  *":$SYS_PATH:"*) ;;
+  *) PATH="${PATH:+$PATH:}$SYS_PATH" ;;
+esac
+export PATH
 # Started by another shell ('sudo sh run.sh': dash on Ubuntu, bash in POSIX mode elsewhere):
-# everything below is plain bash. Plain sh until this line.
+# everything below is plain bash.
 case "${BASH_VERSION:-}:${SHELLOPTS:-}" in
   :*|*posix*) unset POSIXLY_CORRECT; exec bash "$0" "$@" ;;
 esac
 set -u
-
-# sudo swaps PATH for its secure_path, which a box's sudoers can trim: the system's own directories
-# go last, so nothing earlier in PATH (the tests' stubs) is shadowed.
-PATH="${PATH:+$PATH:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-export PATH
 
 # Stop at the first thing missing. bash goes on past a '.' it can't read; without lib/ every test
 # would then end in "command not found".
@@ -25,18 +30,20 @@ start_error() { # what detail
   exit 1
 }
 KIT="$(cd "$(dirname "$0")" && pwd)" || start_error "can't find the kit folder ('$0')" "Run it from the PERSEUS-KIT folder: sudo bash run.sh"
+# Each lib's last line sets LIB_END to its name: a copy cut short anywhere doesn't.
 for lib in common ui gpu; do
   [ -r "$KIT/lib/$lib.sh" ] \
     || start_error "can't read $KIT/lib/$lib.sh" "Copy the whole PERSEUS-KIT folder from the USB again (lib/ belongs next to run.sh)."
+  LIB_END=""
   . "$KIT/lib/$lib.sh"
+  [ "$LIB_END" = "$lib" ] || start_error "$KIT/lib/$lib.sh is incomplete" "Copy the whole PERSEUS-KIT folder from the USB again."
 done
-declare -F run_step ui_init dpm_restore >/dev/null || start_error "the scripts in $KIT/lib are incomplete" "Copy the whole PERSEUS-KIT folder from the USB again."
 missing=""
 for c in awk sed grep cut tr date df cp mv rm mkdir stat sort head tail wc uname id sleep; do
   command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
 done
 [ -z "$missing" ] || start_error "these commands aren't found:$missing" "PATH is $PATH"
-unset lib missing c
+unset lib missing c LIB_END SYS_PATH
 
 # Fixed path (not $HOME) so 'sudo bash run.sh' and 'bash run.sh clean' agree on it.
 LOCAL="${PERSEUS_LOCAL:-/var/tmp/perseus-kit-local}"

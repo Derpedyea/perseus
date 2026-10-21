@@ -227,3 +227,5 @@ write_summary() {
     grep -h '^lut' "$RUN_DIR"/steps/*-lut-bench/stdout.txt 2>/dev/null | sed 's/^/  /'
   } > "$out"
 }
+
+LIB_END=common  # last line: run.sh checks it to catch a copy cut short
