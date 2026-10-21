@@ -121,3 +121,5 @@ gpu_sampler_stop() {
   wait "$GPU_SAMPLER" 2>/dev/null
   GPU_SAMPLER=""
 }
+
+LIB_END=gpu  # last line: run.sh checks it to catch a copy cut short

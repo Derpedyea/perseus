@@ -5,12 +5,50 @@
 # Tests only: PERSEUS_PAUSE_AFTER=STEP-ID pauses after that step, as 'run.sh pause' would;
 # PERSEUS_SYSFS_DRM=DIR stands in for /sys/class/drm (the GPU's clock switch, lib/gpu.sh);
 # PERSEUS_MINUTE_S=N makes a --for minute N seconds long.
+
+# Plain sh down to the 'exec bash' below (it may be dash).
+# sudo swaps PATH for its secure_path, which a box's sudoers can trim, so the system's own
+# directories are appended: last, so nothing earlier (the tests' stubs) is shadowed; before the
+# exec, which needs them to find bash; once, as the exec'd bash runs this again.
+SYS_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+case ":${PATH:-}:" in
+  *":$SYS_PATH:"*) ;;
+  *) PATH="${PATH:+$PATH:}$SYS_PATH" ;;
+esac
+export PATH
+# Started by another shell ('sudo sh run.sh': dash on Ubuntu, bash in POSIX mode elsewhere):
+# everything below is plain bash.
+case "${BASH_VERSION:-}:${SHELLOPTS:-}" in
+  :*|*posix*) unset POSIXLY_CORRECT; exec bash "$0" "$@" ;;
+esac
 set -u
 
-KIT="$(cd "$(dirname "$0")" && pwd)"
-. "$KIT/lib/common.sh"
-. "$KIT/lib/ui.sh"
-. "$KIT/lib/gpu.sh"
+# Stop at the first thing missing. bash goes on past a '.' it can't read; without lib/ every test
+# would then end in "command not found".
+start_error() { # what detail
+  local who; who=$(id -un 2>/dev/null) || who="uid $EUID"  # id may be what's missing
+  printf 'run.sh: %s\n  %s\n  running as %s, in %s\n' "$1" "$2" "$who" "$PWD" >&2
+  exit 1
+}
+# Every command the runner itself uses. One that only a single test needs (perf, pgrep) can only
+# skip or fail that test.
+missing=""
+for c in awk basename cat chmod cp cut date df dirname env grep head id ls mkdir mv nice rm sed sh \
+         sleep sort stat tail touch tr uname wc; do
+  command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
+done
+[ -z "$missing" ] || start_error "these commands aren't found:$missing" "PATH is $PATH"
+KIT="$(cd "$(dirname "$0")" && pwd)" || start_error "can't find the kit folder ('$0')" "Run it from the PERSEUS-KIT folder: sudo bash run.sh"
+# Each lib's last line sets LIB_END to its name: a copy cut short anywhere doesn't. A cut inside a
+# function is a syntax error, which ends the '.' there; bash's own message is left out for ours.
+for lib in common ui gpu; do
+  [ -r "$KIT/lib/$lib.sh" ] \
+    || start_error "can't read $KIT/lib/$lib.sh" "Copy the whole PERSEUS-KIT folder from the USB again (lib/ belongs next to run.sh)."
+  LIB_END=""
+  . "$KIT/lib/$lib.sh" 2>/dev/null
+  [ "$LIB_END" = "$lib" ] || start_error "$KIT/lib/$lib.sh is incomplete or damaged" "Copy the whole PERSEUS-KIT folder from the USB again."
+done
+unset lib missing c LIB_END SYS_PATH
 
 # Fixed path (not $HOME) so 'sudo bash run.sh' and 'bash run.sh clean' agree on it.
 LOCAL="${PERSEUS_LOCAL:-/var/tmp/perseus-kit-local}"
