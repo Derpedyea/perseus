@@ -177,13 +177,18 @@ write_summary() {
       local step; step=$(basename "$(dirname "$f")")
       [ -f "$(dirname "$f")/config.txt" ] && step="$step [$(head -c 20 "$(dirname "$f")/config.txt")]"
       grep '"avg_ts"' "$f" | while read -r line; do
-        local th np ng avg
+        local th np ng avg ub dp extra=""
         th=$(echo "$line" | sed -n 's/.*"n_threads": *\([0-9]*\).*/\1/p')
         np=$(echo "$line" | sed -n 's/.*"n_prompt": *\([0-9]*\).*/\1/p')
         ng=$(echo "$line" | sed -n 's/.*"n_gen": *\([0-9]*\).*/\1/p')
         avg=$(echo "$line" | sed -n 's/.*"avg_ts": *\([0-9.]*\).*/\1/p')
-        if [ "${np:-0}" != 0 ]; then printf '  %-44s t=%-3s pp%-5s %s\n' "$step" "$th" "$np" "$avg"
-        else printf '  %-44s t=%-3s tg%-5s %s\n' "$step" "$th" "$ng" "$avg"; fi
+        # phase 6 varies these; the default ubatch (512) and an empty context go unlabelled
+        ub=$(echo "$line" | sed -n 's/.*"n_ubatch": *\([0-9]*\).*/\1/p')
+        dp=$(echo "$line" | sed -n 's/.*"n_depth": *\([0-9]*\).*/\1/p')
+        [ -n "$ub" ] && [ "$ub" != 512 ] && extra=" ub=$ub"
+        [ -n "$dp" ] && [ "$dp" != 0 ] && extra="$extra at depth $dp"
+        if [ "${np:-0}" != 0 ]; then printf '  %-44s t=%-3s pp%-5s %s%s\n' "$step" "$th" "$np" "$avg" "$extra"
+        else printf '  %-44s t=%-3s tg%-5s %s%s\n' "$step" "$th" "$ng" "$avg" "$extra"; fi
       done
     done
     echo
@@ -206,6 +211,14 @@ write_summary() {
     echo "== Flash-Next and Flint (llama-completion, 128 tokens: cpu-gpu = attention etc. on the GPU, experts on the CPU)"
     grep -H -E 'prompt eval time =|[^t] eval time =|common_params_fit_impl: +- ' "$RUN_DIR"/steps/*-flashnext-cpu-*/stderr.txt "$RUN_DIR"/steps/*-flint-cpu-*/stderr.txt 2>/dev/null \
       | sed "s|$RUN_DIR/steps/||; s|/stderr.txt:|: |; s/[0-9.]* I common_params_fit_impl: *- /GPU placement: /"
+    echo
+    echo "== llama-server (phase 6): load time; per request prompt/generated tok/s, n-gram drafts accepted/drafted; parallel totals"
+    local sf
+    for sf in "$RUN_DIR"/steps/*-serve-*/stdout.txt; do
+      [ -f "$sf" ] || continue
+      echo "  $(basename "$(dirname "$sf")")"
+      sed 's/, "text_head": .*}$/}/; s/^/    /' "$sf"
+    done
     echo
     echo "== Flash-Next profile (phase 4b; tokens/s are in the llama-bench section)"
     sed 's/^/  4b-05 /' "$RUN_DIR"/steps/*-fn-pick/stdout.txt 2>/dev/null

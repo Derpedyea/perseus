@@ -23,8 +23,9 @@ IMAGE_VK=perseus-kit-build-vk:noble
 FORKS="stock"
 VARIANTS="penryn nehalem haswell"
 TARGETS="llama-bench llama-completion llama-speculative-simple llama-cli"
-# The Vulkan build ships these; test-export-graph-ops stays here (it writes the GPU op lists).
-VK_TARGETS="llama-bench llama-completion test-backend-ops"
+# The Vulkan build ships these (llama-server: phase 6); test-export-graph-ops stays here (it writes
+# the GPU op lists).
+VK_TARGETS="llama-bench llama-completion llama-server test-backend-ops"
 # Models whose graphs the GPU self-test (step 3-02) replays: what the lab runs on the GPU.
 GPU_OP_MODELS="Qwen3.5-0.8B-Q4_0.gguf Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf flint-UD-Q4_K_XL.gguf"
 
@@ -137,7 +138,7 @@ build_vulkan() {
   in_image "$IMAGE_VK" "
     cmake -S /work/src/llama.cpp-stock -B /work/build/stock-vk-nehalem -DCMAKE_BUILD_TYPE=Release \
       -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_BACKEND_DL=OFF -DGGML_OPENMP=OFF -DGGML_VULKAN=ON \
-      -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_TESTS=ON -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF \
+      -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_TESTS=ON -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF \
       '-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc' -DCMAKE_C_FLAGS='$(march_flags nehalem)' -DCMAKE_CXX_FLAGS='$(march_flags nehalem)' \
       $(isa_flags nehalem) > /work/build/stock-vk-nehalem.configure.log 2>&1 || { tail -30 /work/build/stock-vk-nehalem.configure.log; exit 1; }
     cmake --build /work/build/stock-vk-nehalem -j${BUILD_JOBS:-\$(nproc)} --target $VK_TARGETS test-export-graph-ops > /work/build/stock-vk-nehalem.build.log 2>&1 || { tail -40 /work/build/stock-vk-nehalem.build.log; exit 1; }
@@ -297,7 +298,7 @@ cmd_assemble() {
   log "writing $out ($((need / 1000000)) MB, tier $tier, fs $fs)"
   mkdir -p "$out/models" "$out/bin" "$out/lib" "$out/src"
   cp "$KIT/run.sh" "$KIT/README.txt" "$KIT/models.tsv" "$out/"
-  cp "$KIT/lib/"*.sh "$out/lib/"
+  cp "$KIT/lib/"*.sh "$KIT/lib/"*.py "$out/lib/"
   cp "$KIT/src/membw.c" "$out/src/"
   for b in $bins; do if [ -d "$WORK/bin/$b" ]; then cp -r "$WORK/bin/$b" "$out/bin/"; fi; done
   gpu_ops_into "$out/gpu-ops"

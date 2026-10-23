@@ -132,17 +132,6 @@ FLINT=flint-UD-Q4_K_XL.gguf
 
 # ---------- the plan: most decision-relevant data first ----------
 # (Helpers the plan's arguments call are defined here: 'status' evaluates the plan early.)
-# 6, 8, one per core, one per hardware thread: the distinct ones this box has.
-fn_threads() {
-  local t out="" seen=","
-  for t in 6 8 "$NPHYS" "$NCPUS"; do
-    [ "$t" -le "$NCPUS" ] || continue
-    case "$seen" in *",$t,"*) continue ;; esac
-    seen="$seen$t,"; out="${out:+$out,}$t"
-  done
-  echo "$out"
-}
-
 # phase NUM TITLE MINUTES (rough estimate for the Mac Pro) / S STEP-ID FUNCTION ARGS...
 plan() {
   phase 1 "machine facts + memory bandwidth" 5
@@ -210,17 +199,12 @@ plan() {
   S 4b-04b-fn-base-again step_cfg base step_moe_bench fn gpu -p 512 -n 64 -r 3 -t "$NPHYS"
   S 4b-04c-fn-novis-again step_cfg novis step_moe_bench fn gpu -p 512 -n 64 -r 3 -t "$NPHYS"
   S 4b-05-fn-pick step_fn_pick 4b-01-fn-base:base 4b-02-fn-novis:novis 4b-03-fn-dpm-high:dpm-high 4b-04-fn-novis-dpm-high:novis-dpm-high
-  S 4b-06-fn-threads step_cfg best step_moe_bench fn gpu -p 0 -n 64 -r 3 -t "$(fn_threads)"
-  # prompt batches: llama.cpp copies the experts to the GPU per batch (op offload) unless told not to
-  S 4b-07-fn-no-op-offload step_cfg best step_moe_bench fn gpu -p 512 -n 0 -r 3 -t "$NPHYS" -nopo 1
+  # Run 3 answered the rest of the old 4b (threads: 12 best; no op offload, CPU only, direct-I/O
+  # load: no gain), so they are gone; these two failed there and are fixed now.
   S 4b-08-fn-gpu-op-times step_cfg best step_fn_profile gpu-ops
   S 4b-09-fn-cpu-profile step_cfg best step_fn_profile perf
-  # the spill mechanism on its own: the tiny model fully on the GPU, and 3-03's matmuls
+  # the spill mechanism on its own: the tiny model fully on the GPU
   S 4b-10-tiny-gpu-novis step_cfg novis step_gpu_bench "$TINY_Q40" 128 32 3
-  S 4b-11-gpu-op-bench-novis step_cfg novis step_gpu_op_bench
-  S 4b-12-fn-cpu-only step_moe_bench fn cpu -p 512 -n 64 -r 2 -t "$NPHYS"
-  # last: it reads 71 GB into RAM, which pushes the mmap steps' page cache out
-  S 4b-13-fn-load-dio step_cfg best step_moe_bench fn gpu -p 0 -n 64 -r 3 -t "$NPHYS" -lm dio
 
   # Recursive's Flint (40B, 2.5B active, 2026-10-21), unsloth's UD-Q4_K_XL: under a third of
   # Flash-Next's bytes per token. Same prompt, settings and splits as phase 4 and 4b-02.
@@ -229,6 +213,24 @@ plan() {
   S 5-02-flint-cpu-only step_gen flint cpu
   S 5-03-flint-bench-gpu step_moe_bench flint gpu -p 512 -n 64 -r 3 -t "$NPHYS"
   S 5-04-flint-bench-cpu step_moe_bench flint cpu -p 512 -n 64 -r 2 -t "$NPHYS"
+
+  # What an API serving coding agents would see. Long prompts: run 3 read prompts at ~38 tok/s
+  # (ubatch 512), so 16k tokens would take ~7 min; a bigger ubatch spreads the experts' copy to the
+  # GPU over more tokens. Depth: tg and pp with 8k (and, for Flint, 32k) tokens already in context.
+  # Then llama-server (lib/serve_bench.py is the client): plain; n-gram self-speculation (no draft
+  # model; llama.cpp's documented MoE settings) on a prompt the answer repeats, as code edits do;
+  # and 1, 2, 4 requests at once.
+  phase 6 "long prompts and serving" 35
+  S 6-01-fn-ubatch step_moe_bench fn gpu -p 2048 -n 0 -ub 512,2048 -r 1 -t "$NPHYS"
+  S 6-02-flint-ubatch step_moe_bench flint gpu -p 2048 -n 0 -ub 512,2048 -r 1 -t "$NPHYS"
+  S 6-03-fn-depth step_moe_bench fn gpu -p 512 -n 32 -d 8192 -ub 2048 -r 1 -t "$NPHYS"
+  S 6-04-flint-depth step_moe_bench flint gpu -p 512 -n 32 -d 8192,32768 -ub 2048 -r 1 -t "$NPHYS"
+  S 6-05-fn-serve-plain step_serve fn plain
+  S 6-06-fn-serve-ngram step_serve fn ngram
+  S 6-07-flint-serve-plain step_serve flint plain
+  S 6-08-flint-serve-ngram step_serve flint ngram
+  S 6-09-fn-serve-parallel step_serve fn parallel
+  S 6-10-flint-serve-parallel step_serve flint parallel
 }
 # Background copy order: what the plan needs first (4-00 waits for Flint).
 PREFETCH_ORDER="$TINY_Q40 $TINY_Q4KM $FLINT $FLASHNEXT $FLASHNEXT_NGRAM"
@@ -1116,6 +1118,46 @@ fn_perf_attach() {
   PERF_ATTACH=$!
 }
 
+# ---------- phase 6: serving ----------
+# llama-server with the model split as 4b (novis), on 127.0.0.1, driven by lib/serve_bench.py.
+#   plain:    one request at a time: a prompt the answer copies (src/membw.c), then a fresh one
+#   ngram:    the same two with n-gram self-speculation
+#   parallel: -np 4; 1, 2 and 4 requests at once (total tok/s)
+# The server runs in the background, where SIGINT is ignored, so a watchdog ends it once this
+# step's shell is gone (done, skipped, failed, Ctrl-C) and run_cmd's timeout bounds it as well.
+SERVE_PORT=18181
+step_serve() { # fn|flint plain|ngram|parallel
+  need_moe "$1"
+  need_gpu
+  [ -x "$VK_BIN/llama-server" ] || skip "no llama-server in this kit"
+  command -v python3 >/dev/null 2>&1 || skip "python3 is not installed (lib/serve_bench.py is the client)"
+  ram_check "$FN_NEED"
+  local np=1 spec=() bench=(--copy "$KIT/src/membw.c" --free "$PROMPT_LONG" --n 256)
+  case "$2" in
+    plain) ;;
+    ngram) spec=(--spec-type ngram-mod --spec-ngram-mod-n-match 24 --spec-ngram-mod-n-min 48 --spec-ngram-mod-n-max 64) ;;
+    parallel) np=4 bench=(--free "$PROMPT_LONG" --n 128 --parallel 1,2,4) ;;
+    *) echo "unknown serve mode '$2'" >&2; return 1 ;;
+  esac
+  note_env
+  local step=$BASHPID rc=0
+  rm -f "$STEP_DIR/.serve-done"
+  local srv_cmd=("$VK_BIN/llama-server" -m "$MP" -dev "$GPU_DEV" $FN_GPU_SPLIT -c $((np * 8192)) -np "$np"
+    -t "$NPHYS" --host 127.0.0.1 --port "$SERVE_PORT" --no-webui ${spec[@]+"${spec[@]}"})
+  printf '%q ' "${srv_cmd[@]}" >> "$STEP_DIR/cmd.txt"; echo >> "$STEP_DIR/cmd.txt"
+  (
+    # timeout itself is the background job (not run_cmd's subshell): killing it reaches the server
+    timeout --kill-after=30 2400 "${srv_cmd[@]}" > "$STEP_DIR/server.txt" 2>&1 &
+    srv=$!
+    while [ ! -f "$STEP_DIR/.serve-done" ] && kill -0 "$step" 2>/dev/null && kill -0 "$srv" 2>/dev/null; do sleep 1; done
+    kill "$srv" 2>/dev/null; wait "$srv" 2>/dev/null
+  ) &
+  local watch=$!
+  run_cmd 2400 python3 -I "$KIT/lib/serve_bench.py" --port "$SERVE_PORT" "${bench[@]}" || rc=$?
+  touch "$STEP_DIR/.serve-done"; wait "$watch" 2>/dev/null
+  return "$rc"
+}
+
 # ---------- go ----------
 # A dry pass over the plan for the screen: step count, widest id, steps done on an earlier day.
 UI_DONE=0
@@ -1143,7 +1185,7 @@ say "CPU build: $VARIANT | NUMA nodes: $NODES | cores: $NPHYS (threads $NCPUS)${
 if [ "$ON_USB" = 0 ]; then
   say "Diagnostics kit: no models on this USB, so only phases 1-3 run (~15 min); model tests are marked 'absent'."
 else
-  say "Phases 1-5 are the important data (~1 h 20 min; more while models copy to this disk)."
+  say "Phases 1-6 are the important data (~1 h 30 min; more while models copy to this disk)."
 fi
 say "Stop any time: Ctrl-C here, or '$UI_CMD pause' / '$UI_CMD stop' in another terminal."
 if [ "$UI" = pretty ]; then
@@ -1151,7 +1193,7 @@ if [ "$UI" = pretty ]; then
   nodes="$NODES NUMA node"; [ "$NODES" = 1 ] || nodes="${nodes}s"
   ui_kv cpu "$VARIANT build, $NPHYS cores / $NCPUS threads, $nodes"
   if [ "$ON_USB" = 0 ]; then ui_kv models "none on this USB: phases 1-3 only (~15 min)"
-  else ui_kv models "$ON_USB files on this USB; phases 1-5 are the key data (~1 h 20 min)"; fi
+  else ui_kv models "$ON_USB files on this USB; phases 1-6 are the key data (~1 h 30 min)"; fi
   if [ -n "$BUDGET_MIN" ]; then
     end=$(( $(date +%s) + DEADLINE - $(now_s) ))  # the enforced deadline, set before setup ran
     ui_kv time "no new tests after $(date -d "@$end" +%H:%M 2>/dev/null || date -r "$end" +%H:%M) (--for $BUDGET_ARG)"

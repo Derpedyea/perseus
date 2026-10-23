@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Phase 4b's wiring, with stub binaries and a fake sysfs GPU: no docker, models, GPU or benchmark,
 # a few seconds per case, so it runs on a dev box that is busy with other work.
-#  (a) a whole run: 4b-01..13 end ok; 4b-05 picks the config the stub makes fastest and the 'best'
+#  (a) a whole run: 4b and phases 5-6 end ok; 4b-05 picks the config the stub makes fastest and the 'best'
 #      steps run under it; the GPU's level is 'high' only inside the steps that pin it, 'auto' after,
 #      no record left; each GPU bench sampled the GPU; summary has the 4b lines; nothing left running
 #  (b) Ctrl-C mid 4b-03 (level pinned): interrupted, level back, record gone, nothing left running
@@ -17,6 +17,7 @@
 #  (m) perf can't attach (no sudo): 4b-09 skipped before Flash-Next is even launched
 #  (n) perf record fails after writing data: 4b-09 failed, not ok
 #  (k) Ctrl-C while perf is attached to 4b-09's benchmark: interrupted, nothing left running
+#  (q) Ctrl-C while a phase-6 step's llama-server is answering: interrupted, server gone
 #  (h) lib/gpu.sh alone: pinning while an earlier restore is still owed keeps the true original
 #  (i) Flash-Next not on the USB (and no clock switch): its 4b steps end 'absent' (4b-05, the pinning
 #      and the 'best' steps too, not failed/skipped), e2e-diag's model_ids classifies exactly those;
@@ -105,12 +106,14 @@ case "$me" in
     # a GPU bench: let the sampler take a sample first (a condition, not a sleep; bounded at 5 s)
     case "$*" in *"-dev Vulkan0"*) i=0; while [ "$(wc -l < "$STEP_DIR/gpu-samples.txt" 2>/dev/null || echo 0)" -lt 2 ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done ;; esac
     ts=3; [ -n "${GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM:-}" ] && ts=$((ts + 1)); [ "$lvl" = high ] && ts=$((ts + 2))
-    p=$(arg -p "$@"); n=$(arg -n "$@"); t=$(arg -t "$@")
-    for th in ${t//,/ }; do
-      [ "${p:-0}" != 0 ] && echo "{\"n_threads\": $th, \"n_prompt\": $p, \"n_gen\": 0, \"avg_ts\": $((ts * 10))}"
-      [ "${n:-0}" != 0 ] && echo "{\"n_threads\": $th, \"n_prompt\": 0, \"n_gen\": $n, \"avg_ts\": $ts}"
-    done; exit 0 ;;
+    p=$(arg -p "$@"); n=$(arg -n "$@"); t=$(arg -t "$@"); u=$(arg -ub "$@"); d=$(arg -d "$@")
+    u=${u:-512} d=${d:-0}
+    for th in ${t//,/ }; do for ub in ${u//,/ }; do for dp in ${d//,/ }; do
+      [ "${p:-0}" != 0 ] && echo "{\"n_ubatch\": $ub, \"n_threads\": $th, \"n_prompt\": $p, \"n_gen\": 0, \"n_depth\": $dp, \"avg_ts\": $((ts * 10))}"
+      [ "${n:-0}" != 0 ] && echo "{\"n_ubatch\": $ub, \"n_threads\": $th, \"n_prompt\": 0, \"n_gen\": $n, \"n_depth\": $dp, \"avg_ts\": $ts}"
+    done; done; done; exit 0 ;;
   llama-completion)
+    echo "stub saw: novis=${GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM:-0} level=$(cat "$DPM" 2>/dev/null || echo none)" >&2
     echo "generate: n_ctx = 4096, n_batch = 2048" >&2
     # the CPU profile attaches perf now: wait for it (a condition, bounded at 5 s)
     case "$STEP_DIR" in *fn-cpu-profile*) i=0; while [ ! -f "$STEP_DIR/.stub-attached" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
@@ -119,6 +122,29 @@ case "$me" in
     echo "common_perf_print:        eval time =  100.00 ms /    31 runs" >&2
     [ -n "${GGML_VK_PERF_LOGGER:-}" ] && printf 'Vulkan Timings:\nMUL_MAT: 2 x 10 us = 20 us\nTotal time: 1000 us.\nTotal time: 1500 us.\n' >&2
     exit 0 ;;
+  llama-server)  # /health: 503 once (loading), then 200; /completion: canned timings
+    echo "stub saw: novis=${GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM:-0} args=$*" >&2
+    exec python3 -c '
+import json, os, sys, time
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+a = sys.argv[1:]
+port, spec, seen = int(a[a.index("--port") + 1]), "--spec-type" in a, []
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *x): pass
+    def reply(self, code, obj):
+        b = json.dumps(obj).encode()
+        self.send_response(code); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def do_GET(self):
+        seen.append(1); self.reply(503 if len(seen) < 2 else 200, {})
+    def do_POST(self):
+        req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if os.environ.get("STUB_HANG_SERVE"):
+            print("stub server: request in", file=sys.stderr, flush=True); time.sleep(60)
+        t = {"prompt_n": 10, "prompt_per_second": 40.0, "predicted_n": req["n_predict"], "predicted_per_second": 8.0}
+        if spec: t.update(draft_n=100, draft_n_accepted=90)
+        self.reply(200, {"content": "stub", "timings": t})
+ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+' "$@" ;;
   test-backend-ops)
     echo "  MUL_MAT(name=z-0,type=f32,ne=[6144,1,1,1],op_params=[],sources=iq3_s[2560,6144,1,1],f32[2560,1,1,1]):   100 runs -    90.83 us/run -   6634 kB/run -   69.65 GB/s"
     echo "  5/5 tests passed"; echo "  Backend Vulkan0: OK"; exit 0 ;;
@@ -126,7 +152,7 @@ case "$me" in
 esac
 EOF
 chmod +x "$T/stub"
-for p in tools/membw stock-vk/nehalem/llama-bench stock-vk/nehalem/llama-completion stock-vk/nehalem/test-backend-ops; do
+for p in tools/membw stock-vk/nehalem/llama-bench stock-vk/nehalem/llama-completion stock-vk/nehalem/llama-server stock-vk/nehalem/test-backend-ops; do
   mkdir -p "$K/bin/$(dirname "$p")"; cp "$T/stub" "$K/bin/$p"
 done
 for f in llama-bench llama-completion llama-speculative-simple test-ssse3-kernels test-fn-kernels test-tiled-mulmat test-repack-mulmat test-lut; do
@@ -156,36 +182,41 @@ if want a; then
 fresh
 run_fg
 for s in 4b-01-fn-base 4b-02-fn-novis 4b-03-fn-dpm-high 4b-04-fn-novis-dpm-high 4b-04b-fn-base-again \
-         4b-04c-fn-novis-again 4b-05-fn-pick 4b-06-fn-threads \
-         4b-07-fn-no-op-offload 4b-08-fn-gpu-op-times 4b-09-fn-cpu-profile 4b-10-tiny-gpu-novis \
-         4b-11-gpu-op-bench-novis 4b-12-fn-cpu-only 4b-13-fn-load-dio \
-         5-01-flint-cpu-gpu 5-02-flint-cpu-only 5-03-flint-bench-gpu 5-04-flint-bench-cpu; do
+         4b-04c-fn-novis-again 4b-05-fn-pick 4b-08-fn-gpu-op-times 4b-09-fn-cpu-profile 4b-10-tiny-gpu-novis \
+         5-01-flint-cpu-gpu 5-02-flint-cpu-only 5-03-flint-bench-gpu 5-04-flint-bench-cpu \
+         6-01-fn-ubatch 6-02-flint-ubatch 6-03-fn-depth 6-04-flint-depth 6-05-fn-serve-plain 6-06-fn-serve-ngram \
+         6-07-flint-serve-plain 6-08-flint-serve-ngram 6-09-fn-serve-parallel 6-10-flint-serve-parallel; do
   expect "(a) $s" ok "$(st $s)"
 done
 R=$(rundir)
 expect "(a) 4b-05 picks the fastest" "FN_BEST=novis-dpm-high" "$(cat "$R/fn-best.env")"
-expect "(a) a 'best' step runs under it" novis-dpm-high "$(cat "$R/steps/4b-06-fn-threads/config.txt")"
-has "(a) 4b-06 saw the pinned level and novis" "novis=1 level=high" "$(cat "$R/steps/4b-06-fn-threads/stderr.txt")"
-has "(a) 4b-06 ran each thread count" '"n_threads": 4, "n_prompt": 0' "$(cat "$R/steps/4b-06-fn-threads/stdout.txt")"
+expect "(a) a 'best' step runs under it" novis-dpm-high "$(cat "$R/steps/4b-08-fn-gpu-op-times/config.txt")"
+has "(a) 4b-08 saw the pinned level and novis" "novis=1 level=high" "$(cat "$R/steps/4b-08-fn-gpu-op-times/stderr.txt")"
 has "(a) 4b-01 ran at the pre-run level" "novis=0 level=auto" "$(cat "$R/steps/4b-01-fn-base/stderr.txt")"
 has "(a) base turns the novis default off" "novis=0 level=auto" "$(cat "$R/steps/4b-04b-fn-base-again/stderr.txt")"
 has "(a) Flint's GPU bench runs novis, the fixed split" "novis=1 level=auto args=-m $L/models/$FL -dev Vulkan0 -ngl 99 -ot exps=CPU" "$(cat "$R/steps/5-03-flint-bench-gpu/stderr.txt")"
 has "(a) 4b-10 runs unpinned after the pinned steps" "novis=1 level=auto" "$(cat "$R/steps/4b-10-tiny-gpu-novis/stderr.txt")"
 has "(a) 4b-03 pinned" "level=high" "$(cat "$R/steps/4b-03-fn-dpm-high/stderr.txt")"
 has "(a) env.txt records the level" "gpu performance level: high" "$(cat "$R/steps/4b-03-fn-dpm-high/env.txt")"
-has "(a) 4b-12 (CPU) runs without Vulkan" "GGML_DISABLE_VULKAN=1" "$(cat "$R/steps/4b-12-fn-cpu-only/env.txt")"
+has "(a) 5-04 (CPU) runs without Vulkan" "GGML_DISABLE_VULKAN=1" "$(cat "$R/steps/5-04-flint-bench-cpu/env.txt")"
 expect "(a) level back to auto" auto "$(cat "$DPM")"
 expect "(a) no record left" none "$([ -f "$REC" ] && echo left || echo none)"
 expect "(a) GPU sampled during 4b-01" "42 1366Mhz 300Mhz" "$(sed -n '2p' "$R/steps/4b-01-fn-base/gpu-samples.txt" | cut -d' ' -f2-)"
-has "(a) dio step passes -lm dio" "-lm dio" "$(cat "$R/steps/4b-13-fn-load-dio/cmd.txt")"
+has "(a) ngram step's server speculates" "args=-m $L/models/$FN1 -dev Vulkan0 -ngl 99 -ot exps=CPU -c 8192 -np 1" "$(cat "$R/steps/6-06-fn-serve-ngram/server.txt")"
+has "(a) with llama.cpp's MoE n-gram settings" "--spec-type ngram-mod --spec-ngram-mod-n-match 24" "$(cat "$R/steps/6-06-fn-serve-ngram/server.txt")"
+has "(a) parallel step: 4 slots" "-c 32768 -np 4" "$(cat "$R/steps/6-09-fn-serve-parallel/server.txt")"
 has "(a) perf attached to the benchmark, no build-id cache" "perf record -F 999 -N -p" "$(cat "$R/steps/4b-09-fn-cpu-profile/perf-record.txt")"
 has "(a) after its load and warmup" "attached after generate" "$(cat "$R/steps/4b-09-fn-cpu-profile/perf-record.txt")"
 sum=$(cat "$R/summary.txt")
 has "(a) summary: pick" "4b-05 picked: novis-dpm-high" "$sum"
-has "(a) summary: config label" "4b-06-fn-threads [novis-dpm-high]" "$sum"
+has "(a) summary: ubatch label" "pp2048  40 ub=2048" "$sum"
+has "(a) summary: depth label" "tg32    4 ub=2048 at depth 32768" "$sum"
+has "(a) summary: copy case" '"case": "copy", "prompt_n": 10' "$sum"
+has "(a) summary: drafts" '"draft_n": 100, "draft_n_accepted": 90' "$sum"
+has "(a) summary: parallel total" '"k": 4, "total_predicted": 512' "$sum"
 has "(a) summary: GPU op time" "GPU op time, all graphs: 2 graphs, 2.5 ms" "$sum"
 has "(a) summary: perf top" "ggml_vec_dot_iq3_s_q8_K" "$sum"
-has "(a) summary: both op benches" "4b-11-gpu-op-bench-novis: Flash-Next decode matmuls" "$sum"
+has "(a) summary: op bench" "3-03-gpu-op-bench: Flash-Next decode matmuls" "$sum"
 expect "(a) nothing left running" none "$(left)"
 out=$(bash "$K/run.sh" status 2>&1); rc=$?
 expect "(a) status exits 0" 0 "$rc"
@@ -271,7 +302,7 @@ run_fg
 expect "(f) 4b-03 skipped without a switch" skipped "$(st 4b-03-fn-dpm-high)"
 has "(f) with the reason" "no single AMD GPU performance-level switch" "$(cat "$(rundir)steps/4b-03-fn-dpm-high/reason")"
 expect "(f) 4b-05 picks among the rest" "FN_BEST=novis" "$(cat "$(rundir)fn-best.env")"
-expect "(f) a 'best' step runs" ok "$(st 4b-06-fn-threads)"
+expect "(f) a 'best' step runs" ok "$(st 4b-08-fn-gpu-op-times)"
 
 fi
 
@@ -281,8 +312,8 @@ fresh
 (export STUB_FAIL_FN=1; run_fg)
 expect "(g) 4b-01 failed" failed "$(st 4b-01-fn-base)"
 expect "(g) 4b-05 failed: nothing to pick" failed "$(st 4b-05-fn-pick)"
-expect "(g) a 'best' step is skipped" skipped "$(st 4b-06-fn-threads)"
-has "(g) because nothing was picked" "4b-05 picked no config" "$(cat "$(rundir)steps/4b-06-fn-threads/reason")"
+expect "(g) a 'best' step is skipped" skipped "$(st 4b-08-fn-gpu-op-times)"
+has "(g) because nothing was picked" "4b-05 picked no config" "$(cat "$(rundir)steps/4b-08-fn-gpu-op-times/reason")"
 expect "(g) no fn-best.env" none "$([ -f "$(rundir)fn-best.env" ] && echo left || echo none)"
 expect "(g) level back to auto" auto "$(cat "$DPM")"
 
@@ -294,20 +325,21 @@ fresh
 mkdir -p "$T/held"; mv "$K/models/$FN1" "$K/models/$FN2" "$T/held/"
 rm -rf "$T/drm/card0"  # a box without the switch must not turn the model steps into final skips
 run_fg
-for s in 4b-01-fn-base 4b-03-fn-dpm-high 4b-04-fn-novis-dpm-high 4b-05-fn-pick 4b-06-fn-threads 4b-08-fn-gpu-op-times 4b-12-fn-cpu-only 4b-13-fn-load-dio; do
+for s in 4b-01-fn-base 4b-03-fn-dpm-high 4b-04-fn-novis-dpm-high 4b-04b-fn-base-again 4b-05-fn-pick 4b-08-fn-gpu-op-times 6-01-fn-ubatch 6-05-fn-serve-plain; do
   expect "(i) $s absent" absent "$(st $s)"
 done
 expect "(i) the tiny-model step still runs" ok "$(st 4b-10-tiny-gpu-novis)"
-expect "(i) no 4b step failed" "" "$(grep -l -x -E 'failed|skipped' "$(rundir)"steps/4b-*/status 2>/dev/null | grep -v 4b-11 | tr '\n' ' ')"
+expect "(i) no 4b step failed" "" "$(grep -l -x -E 'failed|skipped' "$(rundir)"steps/4b-*/status 2>/dev/null | tr '\n' ' ')"
+expect "(i) Flint's phase 6 steps still run" ok "$(st 6-07-flint-serve-plain)"
 eval "$(grep '^model_ids()' "$KITSRC/test/e2e-diag.sh")"
-expect "(i) e2e-diag's model_ids: every 4b step but the op bench" "4b-11-gpu-op-bench-novis" \
-  "$(comm -23 <(grep -o '^  S 4b-[^ ]*' "$K/run.sh" | cut -c5- | sort) <(model_ids "$K" | sort) | tr '\n' ' ' | sed 's/ $//')"
+expect "(i) e2e-diag's model_ids: every 4b and 6 step" "" \
+  "$(comm -23 <(grep -o -E '^  S (4b|6)-[^ ]*' "$K/run.sh" | cut -c5- | sort) <(model_ids "$K" | sort) | tr '\n' ' ' | sed 's/ $//')"
 mv "$T/held/$FN1" "$T/held/$FN2" "$K/models/"
 fake_gpu
 rm -f "$(rundir)FINISHED"  # as if paused: a resume reruns the absent steps once the USB has the model
 run_fg
 expect "(i) back on the USB: 4b-05 runs" ok "$(st 4b-05-fn-pick)"
-expect "(i) and so does a 'best' step" ok "$(st 4b-06-fn-threads)"
+expect "(i) and so does a 'best' step" ok "$(st 4b-08-fn-gpu-op-times)"
 expect "(i) and a pinning step" ok "$(st 4b-03-fn-dpm-high)"
 fi
 
@@ -319,8 +351,9 @@ run_fg
 expect "(j) 4b-01 skipped without a GPU" skipped "$(st 4b-01-fn-base)"
 expect "(j) 4b-05 skipped, not failed" skipped "$(st 4b-05-fn-pick)"
 has "(j) with the reason" "none of the benches to pick from ran" "$(cat "$(rundir)steps/4b-05-fn-pick/reason")"
-expect "(j) a 'best' step skipped" skipped "$(st 4b-06-fn-threads)"
-expect "(j) CPU-only still runs" ok "$(st 4b-12-fn-cpu-only)"
+expect "(j) a 'best' step skipped" skipped "$(st 4b-08-fn-gpu-op-times)"
+expect "(j) a serving step skipped" skipped "$(st 6-05-fn-serve-plain)"
+expect "(j) CPU-only still runs" ok "$(st 5-02-flint-cpu-only)"
 fi
 
 # ---------- (l) ----------
@@ -332,7 +365,8 @@ expect "(l) the next GPU step deferred" interrupted "$(st 4b-04-fn-novis-dpm-hig
 has "(l) with the reason" "clocks are still pinned" "$(cat "$(rundir)steps/4b-04-fn-novis-dpm-high/reason")"
 expect "(l) an unpinned GPU step deferred too" interrupted "$(st 4b-10-tiny-gpu-novis)"
 expect "(l) and it never ran at the wrong level" "" "$(grep 'stub saw' "$(rundir)steps/4b-10-tiny-gpu-novis/stderr.txt" 2>/dev/null)"
-expect "(l) CPU-only still runs" ok "$(st 4b-12-fn-cpu-only)"
+expect "(l) CPU-only still runs" ok "$(st 5-02-flint-cpu-only)"
+expect "(l) a serving step deferred" interrupted "$(st 6-05-fn-serve-plain)"
 has "(l) summary says it's still pinned" "still pinned" "$(cat "$(rundir)summary.txt")"
 expect "(l) the record is kept for a retry" auto "$(cut -f2 "$REC" 2>/dev/null)"
 chmod 644 "$DPM"
@@ -368,6 +402,20 @@ expect "(k) step interrupted" interrupted "$(st 4b-09-fn-cpu-profile)"
 wait_for "[ \"\$(left)\" = none ]" 5
 expect "(k) nothing left running (benchmark, perf, attacher)" none "$(left)"
 expect "(k) level back to auto" auto "$(cat "$DPM")"
+fi
+
+# ---------- (q) ----------
+if want q; then
+fresh
+(cd "$K" && STUB_HANG_SERVE=1 exec bash "$K/run.sh" > "$T/run.out" 2>&1) &
+pid=$!
+wait_for "grep -qs 'request in' \"\$(rundir)steps/6-05-fn-serve-plain/server.txt\"" 120 || bad "(q) the server never got a request in 6-05"
+kill -INT -- "-$pid"
+wait_for "! kill -0 $pid 2>/dev/null" 20 || bad "(q) run did not stop within 20 s of SIGINT"
+wait "$pid" 2>/dev/null
+expect "(q) step interrupted" interrupted "$(st 6-05-fn-serve-plain)"
+wait_for "[ \"\$(left)\" = none ]" 10
+expect "(q) nothing left running (server, watchdog, client)" none "$(left)"
 fi
 
 # ---------- (o) ----------
