@@ -1,6 +1,6 @@
 # Lab kit design
 
-**Invariant:** tests run in a fixed priority order (phases 1-4, 4b), and every planned step ends with exactly one recorded outcome (`ok`, `skipped` + reason, `absent` + reason, `failed`, `timeout`, `interrupted` or `crashed`), and its raw output sits next to it. Nothing is silently dropped, and the kit never changes the lab machine beyond `/var/tmp/perseus-kit-local` and the GPU's performance level while a phase 4b step pins it (always put back: see Phase 4b).
+**Invariant:** tests run in a fixed priority order (phases 1-4, 4b, 5), and every planned step ends with exactly one recorded outcome (`ok`, `skipped` + reason, `absent` + reason, `failed`, `timeout`, `interrupted` or `crashed`), and its raw output sits next to it. Nothing is silently dropped, and the kit never changes the lab machine beyond `/var/tmp/perseus-kit-local` and the GPU's performance level while a phase 4b step pins it (always put back: see Phase 4b).
 
 | Exit | Behaviour | Test |
 |---|---|---|
@@ -59,7 +59,7 @@ The lab box has an AMD RX 580 (Polaris, PCI `1002:67df` rev e7). Flash-Next's pe
 | a split model half downloaded at build time | `assemble` exports a model's op list only when every split file is verified (llama.cpp opens them all, even for metadata); otherwise it logs that and goes on | e2e-diag (c): Flash-Next's first file only → diag kit assembles with the tiny model's list |
 | Flash-Next's two files | shard 1 (weights, 47.0 GB) and shard 2 (the n-gram table, 28.8 GB, read 16 rows per token) are two catalog rows staged and checksummed like any model; llama.cpp finds shard 2 by name next to shard 1, so a step needs both and needs them in the same folder: one staged locally and the other not → `skipped` with that reason | e2e-gpu: both on the USB with `--no-copy` |
 | Flash-Next's size vs RAM and disk | the steps mmap the files (75.8 GB; `-lm none` would hold a second copy beside the page cache); `ram_check` on both shards (needs ~89 GB available; the lab has ~126 GB); the local copy needs 75.8 GB + 5 GB free (the lab has 186 GB) | e2e-gpu: skipped on a 30 GB box |
-| copy time | USB 2.0 (~35 MB/s): the copier takes the tiny model, then Flash-Next (~35 min); the plan waits at 4-01 until Flash-Next is staged. Phase 3 runs during the copy | by construction (copy order = `PREFETCH_ORDER`) |
+| copy time | USB 2.0 (~35 MB/s): the copier takes the tiny model, then Flint (~12 min), then Flash-Next (~35 min); the plan waits at 4-00 for Flint and at 4-01/02 for Flash-Next, so no copy runs beside a model benchmark. Phases 1-3 run during the copy | by construction (copy order = `PREFETCH_ORDER`) |
 | CPU-only vs CPU+GPU A/B | same binary (the Vulkan build), prompt, context, thread count and greedy settings; CPU-only passes `-dev none` (with `-ngl 0` llama.cpp still sends prompt matmuls to the GPU) and `GGML_DISABLE_VULKAN=1`, so Vulkan isn't even loaded and a driver left wedged by a GPU step can't take the CPU baseline down | dev box: `-dev none` + `GGML_DISABLE_VULKAN=1` runs with no Vulkan in its log |
 | GPU driver's on-disk shader cache | Mesa keeps compiled shaders under `$HOME/.cache` (`/root/.cache` under sudo); the kit sets `MESA_SHADER_CACHE_DIR` and `XDG_CACHE_HOME` under `/var/tmp/perseus-kit-local/cache`, which `run.sh clean` removes | e2e-gpu (a): nothing appears under `$HOME`, the cache appears in the local dir |
 
@@ -71,6 +71,8 @@ Run 2 decoded Flash-Next at 278 ms a token on CPU+GPU against a ~85 ms bandwidth
 - `novis`: `GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1`. ggml-vulkan asks for CPU-visible VRAM first (`ggml-vulkan-buffers.cpp`, "use rebar if available"). Without Resizable BAR that is 256 MB on the lab box, and the rest spills to system RAM read over PCIe 2.0: run 2's op bench had 8 matmuls at 1-3 GB/s where the same shapes ran at 120-145.
 - `dpm-high`: the GPU's clocks pinned (`power_dpm_force_performance_level=high`). It idles while the CPU runs each layer's experts, and its memory clock idles at 300 MHz.
 - `dio`: weights read into RAM with direct I/O instead of mmap (llama.cpp warns that CPU tensor overrides with mmap are slower).
+
+Run 3 (2026-10-21): base 3.3 tok/s, novis 7.65, dpm-high 7.5, both 7.6. novis (`GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1`) is now on for every GPU step; `base` and `dpm-high` turn it off. Base ran first that day, so 4b-04b/c repeat base and novis after the others: a first-run effect shows up as a fast base. 4b-08's per-op GPU timer aborted after one graph in ggml-vulkan (`GGML_ASSERT(ctx->compute_ctx.expired())`: an async copy into the CPU-split graph left a compute context open); `kit/build/patch_vulkan.py` flushes it instead. 4b-09's attach probe failed with no message: its 1 s target could exit before perf attached, and `-q` hid the reason; the probe now attaches to a longer-lived target for `-- sleep 1` and keeps perf's output in `perf-probe.txt`.
 
 Every GPU step places the same way, `-ngl 99 -ot exps=CPU`: all but the routed experts on the GPU (5.4 GB of 8). Not `-fit`, because llama-bench frees and reloads the model for every test when fitting, and a fixed split keeps the A/B comparable. 4b-05 picks the fastest decode of 4b-01..04, and the later steps run under that config.
 
@@ -101,6 +103,10 @@ Ordering rule: a step's own prerequisites (model on this USB, GPU, tools) decide
 | `-lm dio` reads 71 GB into RAM | runs last, since it pushes the mmap steps' page cache out. `ram_check` on both shards as everywhere | by construction (order) |
 
 Copies others hold: the kernel holds the performance level until reboot; `$LOCAL/gpu-dpm.restore` holds the pre-run value until it is put back; `$RUN_DIR/fn-best.env` holds 4b-05's pick for the rest of the run (a resumed run reuses it).
+
+## Phase 5: Flint
+
+Recursive's Flint (39.8B total, ~2.5B active, 256 experts + 1 shared, sliding-window and full attention with sinks; released 2026-10-21) in unsloth's UD-Q4_K_XL (25.1 GB, one file): about 1.5 GB read per token against Flash-Next's ~4.7, so a bandwidth ceiling near 17 tok/s on the CPU alone. Its quality is vendor-reported only. Same prompt, greedy settings and splits as Flash-Next: 5-01/02 llama-completion CPU+GPU (`-fit on`) vs CPU only (128 tokens: readable text proves the new architecture works on both), 5-03/04 llama-bench fixed split vs CPU. 3-02 replays Flint's ops on the GPU too. It needs a llama.cpp with the `flint` architecture (upstream since 2026-10-21).
 
 ## Known gaps
 - A step whose command itself exits 3 is recorded as `skipped`: `skip()` and such a command share the exit code. `absent` uses a marker file, so it can't be faked that way.

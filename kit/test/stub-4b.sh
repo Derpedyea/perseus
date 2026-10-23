@@ -48,8 +48,9 @@ mkdir -p "$K/models" "$K/gpu-ops" "$T/path" "$T/drm/card0/device"
 cp "$KITSRC/run.sh" "$KITSRC/README.txt" "$K/"; cp -r "$KITSRC/lib" "$KITSRC/src" "$K/"
 TINY=Qwen3.5-0.8B-Q4_0.gguf TINYK=Qwen3.5-0.8B-Q4_K_M.gguf
 FN1=Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf FN2=Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00002-of-00002.gguf
+FL=flint-UD-Q4_K_XL.gguf
 { printf '#tier\trunner\tfile\tsize\tsha256\turl\n'
-  for f in $TINY $TINYK $FN1 $FN2; do
+  for f in $TINY $TINYK $FN1 $FN2 $FL; do
     echo "stub model $f" > "$K/models/$f"
     printf 'core\tstock\t%s\t%s\t%s\tx\n' "$f" "$(stat -c %s "$K/models/$f")" "$(sha256sum "$K/models/$f" | cut -d' ' -f1)"
   done; } > "$K/models.tsv"
@@ -84,7 +85,7 @@ case "$me" in
       version) [ -n "${STUB_PERF_BROKEN:-}" ] && { echo "WARNING: perf not found for kernel x"; exit 2; }; echo "perf version stub" ;;
       record) o=$(arg -o "$@"); pid=$(arg -p "$@"); d=$(dirname "$o")
         [ -n "${STUB_PERF_NOATTACH:-}" ] && { echo "Error: No permission to enable task-clock event." >&2; exit 255; }
-        case "$o" in *perf-probe.data) while kill -0 "$pid" 2>/dev/null; do sleep 0.1; done; echo probe > "$o"; exit 0 ;; esac
+        case "$o" in *perf-probe.data) echo probe > "$o"; exit 0 ;; esac  # '-- sleep 1' ends the probe
         grep -q 'generate: n_ctx' "$d/stderr.txt" && echo "stub perf: attached after generate" || echo "stub perf: attached before generate"
         touch "$d/.stub-attached"
         while kill -0 "$pid" 2>/dev/null; do sleep 0.1; done
@@ -154,9 +155,11 @@ fresh() { rm -rf "$K/results" "$L"; cp -a "$T/snap-results" "$K/results"; cp -a 
 if want a; then
 fresh
 run_fg
-for s in 4b-01-fn-base 4b-02-fn-novis 4b-03-fn-dpm-high 4b-04-fn-novis-dpm-high 4b-05-fn-pick 4b-06-fn-threads \
+for s in 4b-01-fn-base 4b-02-fn-novis 4b-03-fn-dpm-high 4b-04-fn-novis-dpm-high 4b-04b-fn-base-again \
+         4b-04c-fn-novis-again 4b-05-fn-pick 4b-06-fn-threads \
          4b-07-fn-no-op-offload 4b-08-fn-gpu-op-times 4b-09-fn-cpu-profile 4b-10-tiny-gpu-novis \
-         4b-11-gpu-op-bench-novis 4b-12-fn-cpu-only 4b-13-fn-load-dio; do
+         4b-11-gpu-op-bench-novis 4b-12-fn-cpu-only 4b-13-fn-load-dio \
+         5-01-flint-cpu-gpu 5-02-flint-cpu-only 5-03-flint-bench-gpu 5-04-flint-bench-cpu; do
   expect "(a) $s" ok "$(st $s)"
 done
 R=$(rundir)
@@ -165,6 +168,8 @@ expect "(a) a 'best' step runs under it" novis-dpm-high "$(cat "$R/steps/4b-06-f
 has "(a) 4b-06 saw the pinned level and novis" "novis=1 level=high" "$(cat "$R/steps/4b-06-fn-threads/stderr.txt")"
 has "(a) 4b-06 ran each thread count" '"n_threads": 4, "n_prompt": 0' "$(cat "$R/steps/4b-06-fn-threads/stdout.txt")"
 has "(a) 4b-01 ran at the pre-run level" "novis=0 level=auto" "$(cat "$R/steps/4b-01-fn-base/stderr.txt")"
+has "(a) base turns the novis default off" "novis=0 level=auto" "$(cat "$R/steps/4b-04b-fn-base-again/stderr.txt")"
+has "(a) Flint's GPU bench runs novis, the fixed split" "novis=1 level=auto args=-m $L/models/$FL -dev Vulkan0 -ngl 99 -ot exps=CPU" "$(cat "$R/steps/5-03-flint-bench-gpu/stderr.txt")"
 has "(a) 4b-10 runs unpinned after the pinned steps" "novis=1 level=auto" "$(cat "$R/steps/4b-10-tiny-gpu-novis/stderr.txt")"
 has "(a) 4b-03 pinned" "level=high" "$(cat "$R/steps/4b-03-fn-dpm-high/stderr.txt")"
 has "(a) env.txt records the level" "gpu performance level: high" "$(cat "$R/steps/4b-03-fn-dpm-high/env.txt")"

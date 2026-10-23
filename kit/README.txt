@@ -19,16 +19,16 @@ even a short visit gets the key data, and it continues where it stopped.
    on (a few minutes), leaving time to pack up. --for also takes hours:
    --for 8h, --for 1h30m. Overnight, leave it out: it runs every test.
    sudo bash run.sh --help lists everything it can do. A whole run (phases
-   1-4b) takes about 1 hour, plus ~30 minutes if the big model (75.8 GB)
-   isn't on the Mac's disk from last time.
+   1-5) takes about 1 hour 20 minutes, plus the copy of any big model that
+   isn't on the Mac's disk from last time (Flint 25.1 GB: ~12 minutes;
+   Flash-Next 75.8 GB: ~35 minutes).
    Please do use sudo: phase 4b pins the graphics card's clocks for a few
    tests (and puts them back after each one) and profiles the CPU, and both
    need it. Without sudo those tests are skipped; started without sudo, it
    asks first (Enter = no, so you can start it again with sudo).
-   Phases 3 and 4b use the graphics card: the screen may stutter for a moment.
-   Phase 4 waits until the big model is copied off the USB (about 35 minutes
-   on the Mac's USB 2.0 ports; phases 1-3 run meanwhile), unless it is still
-   on the Mac's disk.
+   Phases 3, 4, 4b and 5 use the graphics card: the screen may stutter for a
+   moment. Phase 4 waits until the big models are copied off the USB (phases
+   1-3 run meanwhile), unless they are still on the Mac's disk.
 
 4. While it runs, keys in its window: p pause after this test (p again
    cancels), s status, l the test's last output lines, m CPU/RAM/GPU now,
@@ -48,7 +48,7 @@ cut it is skipped, not retried; add --retry-failed to retry it.
 
 Disk use: models are copied in the background to /var/tmp/perseus-kit-local
 on the Mac's disk, because USB 2.0 is too slow to load them from repeatedly:
-1.0 GB for the core kit, 76.9 GB for full, plus ~0.4 GB of programs.
+1.0 GB for the core kit, 102 GB for full, plus ~0.4 GB of programs.
 Each copy starts only if the disk has the model's size + 5 GB free; otherwise
 that model runs straight from the USB (slow loads). Delete them when you're
 completely done:

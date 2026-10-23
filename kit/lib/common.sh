@@ -203,8 +203,8 @@ write_summary() {
         | sort -rn | head -15 | awk '{printf "    %9s us %8s GB/s  %-8s %s\n", $1, $2, $3, $4}'
     done
     echo
-    echo "== Flash-Next (llama-completion, 128 tokens: cpu-gpu = attention etc. on the GPU, experts on the CPU)"
-    grep -H -E 'prompt eval time =|[^t] eval time =|common_params_fit_impl: +- ' "$RUN_DIR"/steps/*-flashnext-cpu-*/stderr.txt 2>/dev/null \
+    echo "== Flash-Next and Flint (llama-completion, 128 tokens: cpu-gpu = attention etc. on the GPU, experts on the CPU)"
+    grep -H -E 'prompt eval time =|[^t] eval time =|common_params_fit_impl: +- ' "$RUN_DIR"/steps/*-flashnext-cpu-*/stderr.txt "$RUN_DIR"/steps/*-flint-cpu-*/stderr.txt 2>/dev/null \
       | sed "s|$RUN_DIR/steps/||; s|/stderr.txt:|: |; s/[0-9.]* I common_params_fit_impl: *- /GPU placement: /"
     echo
     echo "== Flash-Next profile (phase 4b; tokens/s are in the llama-bench section)"
