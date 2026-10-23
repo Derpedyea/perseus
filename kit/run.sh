@@ -128,20 +128,10 @@ TINY_Q40=Qwen3.5-0.8B-Q4_0.gguf
 TINY_Q4KM=Qwen3.5-0.8B-Q4_K_M.gguf
 FLASHNEXT=Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf
 FLASHNEXT_NGRAM=Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00002-of-00002.gguf
+FLINT=flint-UD-Q4_K_XL.gguf
 
 # ---------- the plan: most decision-relevant data first ----------
 # (Helpers the plan's arguments call are defined here: 'status' evaluates the plan early.)
-# 6, 8, one per core, one per hardware thread: the distinct ones this box has.
-fn_threads() {
-  local t out="" seen=","
-  for t in 6 8 "$NPHYS" "$NCPUS"; do
-    [ "$t" -le "$NCPUS" ] || continue
-    case "$seen" in *",$t,"*) continue ;; esac
-    seen="$seen$t,"; out="${out:+$out,}$t"
-  done
-  echo "$out"
-}
-
 # phase NUM TITLE MINUTES (rough estimate for the Mac Pro) / S STEP-ID FUNCTION ARGS...
 plan() {
   phase 1 "machine facts + memory bandwidth" 5
@@ -183,39 +173,67 @@ plan() {
   # The target: Qwen3.8-Flash-Next (180B, 6B active), ISTA's GSQ-RCO IQ3_XXS (within 1% of BF16 on
   # AIME/GPQA/LiveCodeBench). CPU+GPU: attention, shared experts and router on the GPU, routed
   # experts in RAM on the perseus SSSE3 kernels. Same prompt and settings with and without the GPU.
+  # 4-00 waits for phase 5's model too: the background copy (Flint first, then Flash-Next) is done
+  # before the first timed model step, so no copy runs beside a benchmark.
   phase 4 "Flash-Next: CPU+GPU vs CPU only" 35
+  S 4-00-flint-stage step_stage "$FLINT"
   S 4-01-flashnext-stage step_stage "$FLASHNEXT"
   S 4-02-flashnext-ngram-stage step_stage "$FLASHNEXT_NGRAM"
-  S 4-03-flashnext-cpu-gpu step_flashnext gpu
-  S 4-04-flashnext-cpu-only step_flashnext cpu
+  S 4-03-flashnext-cpu-gpu step_gen fn gpu
+  S 4-04-flashnext-cpu-only step_gen fn cpu
 
   # Where Flash-Next's CPU+GPU time goes (run 2: 278 ms a token against a ~85 ms bandwidth
   # ceiling), and three free knobs. novis: GPU buffers in plain VRAM; ggml-vulkan asks for
   # CPU-visible VRAM first, only 256 MB without Resizable BAR, and spills to system RAM over PCIe.
   # dpm-high: the GPU's clocks pinned (lib/gpu.sh); it idles while the CPU runs the experts. dio:
   # weights read into RAM instead of mmap. 4b-05 picks the fastest of 4b-01..04 for the rest.
+  # Run 3: base 3.3 tok/s, the other three 7.5-7.7, but base ran first; 4b-04b/c repeat base and
+  # novis after the others, so a first-run effect shows up as a fast base.
   # Every GPU step places the same way: all but the routed experts on the GPU. Staging (4-01/02) is
   # done by now, so no background copy runs beside these.
   phase 4b "Flash-Next: where the time goes" 45
-  S 4b-01-fn-base step_cfg base step_fn_bench gpu -p 512 -n 64 -r 3 -t "$NPHYS"
-  S 4b-02-fn-novis step_cfg novis step_fn_bench gpu -p 512 -n 64 -r 3 -t "$NPHYS"
-  S 4b-03-fn-dpm-high step_cfg dpm-high step_fn_bench gpu -p 512 -n 64 -r 3 -t "$NPHYS"
-  S 4b-04-fn-novis-dpm-high step_cfg novis-dpm-high step_fn_bench gpu -p 512 -n 64 -r 3 -t "$NPHYS"
+  S 4b-01-fn-base step_cfg base step_moe_bench fn gpu -p 512 -n 64 -r 3 -t "$NPHYS"
+  S 4b-02-fn-novis step_cfg novis step_moe_bench fn gpu -p 512 -n 64 -r 3 -t "$NPHYS"
+  S 4b-03-fn-dpm-high step_cfg dpm-high step_moe_bench fn gpu -p 512 -n 64 -r 3 -t "$NPHYS"
+  S 4b-04-fn-novis-dpm-high step_cfg novis-dpm-high step_moe_bench fn gpu -p 512 -n 64 -r 3 -t "$NPHYS"
+  S 4b-04b-fn-base-again step_cfg base step_moe_bench fn gpu -p 512 -n 64 -r 3 -t "$NPHYS"
+  S 4b-04c-fn-novis-again step_cfg novis step_moe_bench fn gpu -p 512 -n 64 -r 3 -t "$NPHYS"
   S 4b-05-fn-pick step_fn_pick 4b-01-fn-base:base 4b-02-fn-novis:novis 4b-03-fn-dpm-high:dpm-high 4b-04-fn-novis-dpm-high:novis-dpm-high
-  S 4b-06-fn-threads step_cfg best step_fn_bench gpu -p 0 -n 64 -r 3 -t "$(fn_threads)"
-  # prompt batches: llama.cpp copies the experts to the GPU per batch (op offload) unless told not to
-  S 4b-07-fn-no-op-offload step_cfg best step_fn_bench gpu -p 512 -n 0 -r 3 -t "$NPHYS" -nopo 1
+  # Run 3 answered the rest of the old 4b (threads: 12 best; no op offload, CPU only, direct-I/O
+  # load: no gain), so they are gone; these two failed there and are fixed now.
   S 4b-08-fn-gpu-op-times step_cfg best step_fn_profile gpu-ops
   S 4b-09-fn-cpu-profile step_cfg best step_fn_profile perf
-  # the spill mechanism on its own: the tiny model fully on the GPU, and 3-03's matmuls
+  # the spill mechanism on its own: the tiny model fully on the GPU
   S 4b-10-tiny-gpu-novis step_cfg novis step_gpu_bench "$TINY_Q40" 128 32 3
-  S 4b-11-gpu-op-bench-novis step_cfg novis step_gpu_op_bench
-  S 4b-12-fn-cpu-only step_fn_bench cpu -p 512 -n 64 -r 2 -t "$NPHYS"
-  # last: it reads 71 GB into RAM, which pushes the mmap steps' page cache out
-  S 4b-13-fn-load-dio step_cfg best step_fn_bench gpu -p 0 -n 64 -r 3 -t "$NPHYS" -lm dio
+
+  # Recursive's Flint (40B, 2.5B active, 2026-10-21), unsloth's UD-Q4_K_XL: under a third of
+  # Flash-Next's bytes per token. Same prompt, settings and splits as phase 4 and 4b-02.
+  phase 5 "Flint 40B: CPU+GPU vs CPU only" 15
+  S 5-01-flint-cpu-gpu step_gen flint gpu
+  S 5-02-flint-cpu-only step_gen flint cpu
+  S 5-03-flint-bench-gpu step_moe_bench flint gpu -p 512 -n 64 -r 3 -t "$NPHYS"
+  S 5-04-flint-bench-cpu step_moe_bench flint cpu -p 512 -n 64 -r 2 -t "$NPHYS"
+
+  # What an API serving coding agents would see. Long prompts: run 3 read prompts at ~38 tok/s
+  # (ubatch 512), so 16k tokens would take ~7 min; a bigger ubatch spreads the experts' copy to the
+  # GPU over more tokens. Depth: tg and pp with 8k (and, for Flint, 32k) tokens already in context.
+  # Then llama-server (lib/serve_bench.py is the client): plain; n-gram self-speculation (no draft
+  # model; llama.cpp's documented MoE settings) on a prompt the answer repeats, as code edits do;
+  # and 1, 2, 4 requests at once.
+  phase 6 "long prompts and serving" 35
+  S 6-01-fn-ubatch step_moe_bench fn gpu -p 2048 -n 0 -ub 512,2048 -r 1 -t "$NPHYS"
+  S 6-02-flint-ubatch step_moe_bench flint gpu -p 2048 -n 0 -ub 512,2048 -r 1 -t "$NPHYS"
+  S 6-03-fn-depth step_moe_bench fn gpu -p 512 -n 32 -d 8192 -ub 2048 -r 1 -t "$NPHYS"
+  S 6-04-flint-depth step_moe_bench flint gpu -p 512 -n 32 -d 8192,32768 -ub 2048 -r 1 -t "$NPHYS"
+  S 6-05-fn-serve-plain step_serve fn plain
+  S 6-06-fn-serve-ngram step_serve fn ngram
+  S 6-07-flint-serve-plain step_serve flint plain
+  S 6-08-flint-serve-ngram step_serve flint ngram
+  S 6-09-fn-serve-parallel step_serve fn parallel
+  S 6-10-flint-serve-parallel step_serve flint parallel
 }
-# Background copy order: what the plan needs first.
-PREFETCH_ORDER="$TINY_Q40 $TINY_Q4KM $FLASHNEXT $FLASHNEXT_NGRAM"
+# Background copy order: what the plan needs first (4-00 waits for Flint).
+PREFETCH_ORDER="$TINY_Q40 $TINY_Q4KM $FLINT $FLASHNEXT $FLASHNEXT_NGRAM"
 
 # ---------- lock owner (shared by run / status / pause / stop) ----------
 # The lock holds "HOST PID PGID". OWNER_* are set by owner_alive.
@@ -423,6 +441,9 @@ VK_BIN="$BIN/stock-vk/nehalem"  # Vulkan build (the lab's GPU); nehalem only, se
 # sudo). Keep it, and any other XDG cache, inside $LOCAL, which 'run.sh clean' removes.
 MESA_SHADER_CACHE_DIR="$LOCAL/cache/mesa_shader_cache" XDG_CACHE_HOME="$LOCAL/cache"
 export MESA_SHADER_CACHE_DIR XDG_CACHE_HOME
+# GPU buffers in plain VRAM, for every GPU step (4b's base and dpm-high configs turn it off): run 3
+# took Flash-Next CPU+GPU from 3.3 to 7.7 tok/s with it.
+GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1; export GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM
 MEMBW=""
 VARIANT=none
 NODES=1 NCPUS=1 NPHYS=1 NODE0_NCPUS=1 NODE0_NPHYS=1 ALL_PHYS=0
@@ -921,13 +942,28 @@ need_flashnext() {
   need_vk_build
 }
 
-# Flash-Next, same binary, prompt, context, threads and greedy settings; only the GPU differs.
+need_flint() { # sets MP and FN_NEED, as need_flashnext
+  need_linux_llama
+  need_model "$FLINT"
+  FN_NEED=${M_SIZE[$MI]}
+  need_vk_build
+}
+
+need_moe() { # fn|flint
+  case "$1" in
+    fn) need_flashnext ;;
+    flint) need_flint ;;
+    *) echo "unknown model '$1'" >&2; exit 1 ;;
+  esac
+}
+
+# Flash-Next or Flint, same binary, prompt, context, threads and greedy settings; only the GPU differs.
 #   gpu: llama.cpp's --fit fills the GPU back to front with each layer's attention, shared experts
 #        and router (routed experts stay in RAM) as far as free VRAM goes; -lv 4 logs its choices
 #   cpu: -dev none, so nothing reaches the GPU (with -ngl 0 the prompt's matmuls still would)
 # mmap (the default), not -lm none: a 75.8 GB model read into RAM would sit beside its page cache.
-step_flashnext() { # gpu|cpu
-  need_flashnext  # the Vulkan build runs both halves of this A/B
+step_gen() { # fn|flint gpu|cpu
+  need_moe "$1"; shift  # the Vulkan build runs both halves of this A/B
   local dev
   # cpu: Vulkan not even loaded, so a GPU driver left wedged by an earlier step can't take the
   # CPU baseline down with it
@@ -958,9 +994,9 @@ step_cfg() { # base|novis|dpm-high|novis-dpm-high|best step args...
   fi
   echo "$cfg" > "$STEP_DIR/config.txt"
   case "$cfg" in
-    base) ;;
+    base) unset GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM ;;
     novis) export GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1 ;;
-    dpm-high) FN_PIN=1 ;;
+    dpm-high) unset GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM; FN_PIN=1 ;;
     novis-dpm-high) export GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1; FN_PIN=1 ;;
     *) echo "unknown config '$cfg' (fn-best.env damaged?)" >&2; exit 1 ;;
   esac
@@ -971,11 +1007,11 @@ step_cfg() { # base|novis|dpm-high|novis-dpm-high|best step args...
   return "$rc"
 }
 
-# llama-bench on Flash-Next. gpu: the fixed split, with the GPU's busy % and clocks sampled into
-# gpu-samples.txt; cpu: nothing on the GPU, Vulkan not loaded (as 4-04).
-step_fn_bench() { # gpu|cpu llama-bench args...
-  local where="$1" dev rc=0; shift
-  need_flashnext
+# llama-bench on Flash-Next or Flint. gpu: the fixed split, with the GPU's busy % and clocks
+# sampled into gpu-samples.txt; cpu: nothing on the GPU, Vulkan not loaded (as 4-04).
+step_moe_bench() { # fn|flint gpu|cpu llama-bench args...
+  need_moe "$1"
+  local where="$2" dev rc=0; shift 2
   if [ "$where" = gpu ]; then need_gpu; dev=(-dev "$GPU_DEV" $FN_GPU_SPLIT)
   else dev=(-dev none); GGML_DISABLE_VULKAN=1; export GGML_DISABLE_VULKAN; fi
   ram_check "$FN_NEED"
@@ -1047,14 +1083,16 @@ step_fn_profile() { # gpu-ops|perf
 }
 
 # Can perf attach to another process here, as 4b-09 will? Ubuntu forbids it without sudo
-# (perf_event_paranoid, Yama ptrace scope). Tried on a 1 s 'sleep', so a refusal skips the step
-# before Flash-Next loads (30-190 s).
+# (perf_event_paranoid, Yama ptrace scope). Tried on a 'sleep' for 1 s, so a refusal skips the step
+# before Flash-Next loads (30-190 s). The target outlives the probe ('-- sleep 1' ends it): run 3's
+# 1 s target could exit before perf attached, and -q hid perf's reason (the skip came out blank).
 fn_perf_probe() {
   local t out rc=0
-  sleep 1 & t=$!
-  out=$(perf record -q -N -F 99 -p "$t" -o "$STEP_DIR/perf-probe.data" 2>&1) || rc=$?
+  sleep 60 & t=$!
+  out=$(perf record -N -F 99 -p "$t" -o "$STEP_DIR/perf-probe.data" -- sleep 1 2>&1) || rc=$?
   kill "$t" 2>/dev/null; wait "$t" 2>/dev/null; rm -f "$STEP_DIR/perf-probe.data"
-  [ "$rc" = 0 ] || skip "perf can't attach to a process here (sudo bash run.sh): $(echo "$out" | tr '\n' ' ' | head -c 160)"
+  echo "$out" > "$STEP_DIR/perf-probe.txt"
+  [ "$rc" = 0 ] || skip "perf can't attach to a process here (exit $rc; perf-probe.txt): $(echo "$out" | tr '\n' ' ' | head -c 140)"
 }
 
 # Attaches perf to the step's llama-completion once it has loaded and warmed up (its "generate:"
@@ -1078,6 +1116,46 @@ fn_perf_attach() {
     exec perf record -F 999 -N -p "$pid" -o "$STEP_DIR/perf.data"
   ) > "$STEP_DIR/perf-record.txt" 2>&1 &
   PERF_ATTACH=$!
+}
+
+# ---------- phase 6: serving ----------
+# llama-server with the model split as 4b (novis), on 127.0.0.1, driven by lib/serve_bench.py.
+#   plain:    one request at a time: a prompt the answer copies (src/membw.c), then a fresh one
+#   ngram:    the same two with n-gram self-speculation
+#   parallel: -np 4; 1, 2 and 4 requests at once (total tok/s)
+# The server runs in the background, where SIGINT is ignored, so a watchdog ends it once this
+# step's shell is gone (done, skipped, failed, Ctrl-C) and run_cmd's timeout bounds it as well.
+SERVE_PORT=18181
+step_serve() { # fn|flint plain|ngram|parallel
+  need_moe "$1"
+  need_gpu
+  [ -x "$VK_BIN/llama-server" ] || skip "no llama-server in this kit"
+  command -v python3 >/dev/null 2>&1 || skip "python3 is not installed (lib/serve_bench.py is the client)"
+  ram_check "$FN_NEED"
+  local np=1 spec=() bench=(--copy "$KIT/src/membw.c" --free "$PROMPT_LONG" --n 256)
+  case "$2" in
+    plain) ;;
+    ngram) spec=(--spec-type ngram-mod --spec-ngram-mod-n-match 24 --spec-ngram-mod-n-min 48 --spec-ngram-mod-n-max 64) ;;
+    parallel) np=4 bench=(--free "$PROMPT_LONG" --n 128 --parallel 1,2,4) ;;
+    *) echo "unknown serve mode '$2'" >&2; return 1 ;;
+  esac
+  note_env
+  local step=$BASHPID rc=0
+  rm -f "$STEP_DIR/.serve-done"
+  local srv_cmd=("$VK_BIN/llama-server" -m "$MP" -dev "$GPU_DEV" $FN_GPU_SPLIT -c $((np * 8192)) -np "$np"
+    -t "$NPHYS" --host 127.0.0.1 --port "$SERVE_PORT" --no-webui ${spec[@]+"${spec[@]}"})
+  printf '%q ' "${srv_cmd[@]}" >> "$STEP_DIR/cmd.txt"; echo >> "$STEP_DIR/cmd.txt"
+  (
+    # timeout itself is the background job (not run_cmd's subshell): killing it reaches the server
+    timeout --kill-after=30 2400 "${srv_cmd[@]}" > "$STEP_DIR/server.txt" 2>&1 &
+    srv=$!
+    while [ ! -f "$STEP_DIR/.serve-done" ] && kill -0 "$step" 2>/dev/null && kill -0 "$srv" 2>/dev/null; do sleep 1; done
+    kill "$srv" 2>/dev/null; wait "$srv" 2>/dev/null
+  ) &
+  local watch=$!
+  run_cmd 2400 python3 -I "$KIT/lib/serve_bench.py" --port "$SERVE_PORT" "${bench[@]}" || rc=$?
+  touch "$STEP_DIR/.serve-done"; wait "$watch" 2>/dev/null
+  return "$rc"
 }
 
 # ---------- go ----------
@@ -1107,7 +1185,7 @@ say "CPU build: $VARIANT | NUMA nodes: $NODES | cores: $NPHYS (threads $NCPUS)${
 if [ "$ON_USB" = 0 ]; then
   say "Diagnostics kit: no models on this USB, so only phases 1-3 run (~15 min); model tests are marked 'absent'."
 else
-  say "Phases 1-4b are the important data (~1 h; ~30 min more if Flash-Next isn't on this disk yet)."
+  say "Phases 1-6 are the important data (~1 h 30 min; more while models copy to this disk)."
 fi
 say "Stop any time: Ctrl-C here, or '$UI_CMD pause' / '$UI_CMD stop' in another terminal."
 if [ "$UI" = pretty ]; then
@@ -1115,7 +1193,7 @@ if [ "$UI" = pretty ]; then
   nodes="$NODES NUMA node"; [ "$NODES" = 1 ] || nodes="${nodes}s"
   ui_kv cpu "$VARIANT build, $NPHYS cores / $NCPUS threads, $nodes"
   if [ "$ON_USB" = 0 ]; then ui_kv models "none on this USB: phases 1-3 only (~15 min)"
-  else ui_kv models "$ON_USB files on this USB; phases 1-4b are the key data (~1 h)"; fi
+  else ui_kv models "$ON_USB files on this USB; phases 1-6 are the key data (~1 h 30 min)"; fi
   if [ -n "$BUDGET_MIN" ]; then
     end=$(( $(date +%s) + DEADLINE - $(now_s) ))  # the enforced deadline, set before setup ran
     ui_kv time "no new tests after $(date -d "@$end" +%H:%M 2>/dev/null || date -r "$end" +%H:%M) (--for $BUDGET_ARG)"

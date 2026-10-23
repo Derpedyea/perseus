@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the offline lab kit on a machine WITH internet. Everything heavy lives in $WORK
+# Builds the offline lab kit on a machine WITH internet (BUILD_JOBS=N caps compile jobs). Everything heavy lives in $WORK
 # (default ~/.cache/perseus-kit), never in the repo.
 #
 #   build-kit.sh src                 clone/refresh llama.cpp
@@ -10,7 +10,8 @@
 #   build-kit.sh assemble DEST [TIER]  write DEST/PERSEUS-KIT (scripts, binaries, GPU op lists, models, MANIFEST.json)
 #   build-kit.sh zip OUT.zip         the diag kit (assemble ... diag) as one zip: PERSEUS-KIT/ at the top
 # Tiers: diag = no models (machine facts, memory bandwidth, CPU kernel + GPU checks; FAT32 is fine),
-#        core = + the tiny Qwen3.5-0.8B pair (1.0 GB of models), full = + Qwen3.8-Flash-Next IQ3_XXS (76.9 GB).
+#        core = + the tiny Qwen3.5-0.8B pair (1.0 GB of models), full = + Qwen3.8-Flash-Next IQ3_XXS (75.8 GB)
+#        and Flint UD-Q4_K_XL (25.1 GB).
 #        Default: full.
 set -euo pipefail
 
@@ -22,10 +23,11 @@ IMAGE_VK=perseus-kit-build-vk:noble
 FORKS="stock"
 VARIANTS="penryn nehalem haswell"
 TARGETS="llama-bench llama-completion llama-speculative-simple llama-cli"
-# The Vulkan build ships these; test-export-graph-ops stays here (it writes the GPU op lists).
-VK_TARGETS="llama-bench llama-completion test-backend-ops"
+# The Vulkan build ships these (llama-server: phase 6); test-export-graph-ops stays here (it writes
+# the GPU op lists).
+VK_TARGETS="llama-bench llama-completion llama-server test-backend-ops"
 # Models whose graphs the GPU self-test (step 3-02) replays: what the lab runs on the GPU.
-GPU_OP_MODELS="Qwen3.5-0.8B-Q4_0.gguf Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf"
+GPU_OP_MODELS="Qwen3.5-0.8B-Q4_0.gguf Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf flint-UD-Q4_K_XL.gguf"
 
 die() { echo "build-kit: $*" >&2; exit 1; }
 log() { echo "[$(date +%H:%M:%S)] $*"; }
@@ -54,7 +56,8 @@ cmd_src() {
     read -r name url branch <<<"$spec"
     local dir="$WORK/src/llama.cpp-$name"
     if [ -d "$dir/.git" ]; then
-      git -C "$dir" fetch -q --depth 1 origin "$branch" && git -C "$dir" checkout -q FETCH_HEAD
+      # the perseus patches (cmd_binaries re-applies them) would block the checkout
+      git -C "$dir" fetch -q --depth 1 origin "$branch" && git -C "$dir" checkout -q -f FETCH_HEAD
     else
       git clone -q --depth 1 --branch "$branch" "$url" "$dir"
     fi
@@ -87,10 +90,11 @@ cmd_binaries() {
   mkdir -p "$WORK/bin" "$WORK/build"
   # perseus patches for pre-AVX CPUs (kernels/), applied to a clean copy of the files they touch
   local stock="$WORK/src/llama.cpp-stock"
-  git -C "$stock" checkout -- ggml/src/ggml-cpu/arch/x86/quants.c ggml/src/ggml-cpu/arch-fallback.h ggml/src/ggml-cpu/quants.h ggml/src/ggml-cpu/ggml-cpu.c ggml/src/ggml-cpu/repack.cpp ggml/src/ggml-cpu/tiled
+  git -C "$stock" checkout -- ggml/src/ggml-cpu/arch/x86/quants.c ggml/src/ggml-cpu/arch-fallback.h ggml/src/ggml-cpu/quants.h ggml/src/ggml-cpu/ggml-cpu.c ggml/src/ggml-cpu/repack.cpp ggml/src/ggml-cpu/tiled ggml/src/ggml-vulkan/ggml-vulkan.cpp
   python3 -I "$KERNELS/apply_ssse3.py" "$stock" || die "could not apply the SSSE3 kernels"
   python3 -I "$KERNELS/apply_ssse3_fn.py" "$stock" || die "could not apply the Flash-Next SSSE3 kernels"
   python3 -I "$KERNELS/apply_tiled_sse.py" "$stock" || die "could not enable the tiled matmul on SSE4.1"
+  python3 -I "$KIT/build/patch_vulkan.py" "$stock" || die "could not patch ggml-vulkan's perf logger"
   log "membw (static, baseline x86-64)"
   in_docker "mkdir -p /work/bin/tools && gcc -O2 -Wall -Wextra -Werror -static -pthread -march=x86-64 -mtune=generic -o /work/bin/tools/membw /kit/src/membw.c"
   for fork in $FORKS; do
@@ -102,7 +106,7 @@ cmd_binaries() {
           -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF \
           -DCMAKE_EXE_LINKER_FLAGS=-static -DCMAKE_C_FLAGS='$(march_flags "$v")' -DCMAKE_CXX_FLAGS='$(march_flags "$v")' \
           $(isa_flags "$v") > /work/build/$fork-$v.configure.log 2>&1 || { tail -30 /work/build/$fork-$v.configure.log; exit 1; }
-        cmake --build /work/build/$fork-$v -j\$(nproc) --target $TARGETS > /work/build/$fork-$v.build.log 2>&1 || { tail -40 /work/build/$fork-$v.build.log; exit 1; }
+        cmake --build /work/build/$fork-$v -j${BUILD_JOBS:-\$(nproc)} --target $TARGETS > /work/build/$fork-$v.build.log 2>&1 || { tail -40 /work/build/$fork-$v.build.log; exit 1; }
         mkdir -p /work/bin/$fork/$v
         for t in $TARGETS; do cp /work/build/$fork-$v/bin/\$t /work/bin/$fork/$v/; strip /work/bin/$fork/$v/\$t; done
         file /work/bin/$fork/$v/llama-bench | grep -q 'statically linked' || { echo 'not static'; exit 1; }
@@ -134,10 +138,10 @@ build_vulkan() {
   in_image "$IMAGE_VK" "
     cmake -S /work/src/llama.cpp-stock -B /work/build/stock-vk-nehalem -DCMAKE_BUILD_TYPE=Release \
       -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_BACKEND_DL=OFF -DGGML_OPENMP=OFF -DGGML_VULKAN=ON \
-      -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_TESTS=ON -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF \
+      -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_TESTS=ON -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF \
       '-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc' -DCMAKE_C_FLAGS='$(march_flags nehalem)' -DCMAKE_CXX_FLAGS='$(march_flags nehalem)' \
       $(isa_flags nehalem) > /work/build/stock-vk-nehalem.configure.log 2>&1 || { tail -30 /work/build/stock-vk-nehalem.configure.log; exit 1; }
-    cmake --build /work/build/stock-vk-nehalem -j\$(nproc) --target $VK_TARGETS test-export-graph-ops > /work/build/stock-vk-nehalem.build.log 2>&1 || { tail -40 /work/build/stock-vk-nehalem.build.log; exit 1; }
+    cmake --build /work/build/stock-vk-nehalem -j${BUILD_JOBS:-\$(nproc)} --target $VK_TARGETS test-export-graph-ops > /work/build/stock-vk-nehalem.build.log 2>&1 || { tail -40 /work/build/stock-vk-nehalem.build.log; exit 1; }
     d=/work/bin/stock-vk/nehalem
     rm -rf \$d && mkdir -p \$d/lib
     for t in $VK_TARGETS; do
@@ -294,7 +298,7 @@ cmd_assemble() {
   log "writing $out ($((need / 1000000)) MB, tier $tier, fs $fs)"
   mkdir -p "$out/models" "$out/bin" "$out/lib" "$out/src"
   cp "$KIT/run.sh" "$KIT/README.txt" "$KIT/models.tsv" "$out/"
-  cp "$KIT/lib/"*.sh "$out/lib/"
+  cp "$KIT/lib/"*.sh "$KIT/lib/"*.py "$out/lib/"
   cp "$KIT/src/membw.c" "$out/src/"
   for b in $bins; do if [ -d "$WORK/bin/$b" ]; then cp -r "$WORK/bin/$b" "$out/bin/"; fi; done
   gpu_ops_into "$out/gpu-ops"
@@ -308,9 +312,9 @@ cmd_assemble() {
   {
     printf '{\n  "built_at": "%s",\n  "tier": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$tier"
     printf '  "stock_commit": "%s",\n' "$(git -C "$WORK/src/llama.cpp-stock" rev-parse HEAD)"
-    printf '  "stock_patch": "kernels/apply_ssse3.py sha256 %s, kernels/apply_ssse3_fn.py sha256 %s, kernels/apply_tiled_sse.py sha256 %s",\n' \
+    printf '  "stock_patch": "kernels/apply_ssse3.py sha256 %s, kernels/apply_ssse3_fn.py sha256 %s, kernels/apply_tiled_sse.py sha256 %s, kit/build/patch_vulkan.py sha256 %s",\n' \
       "$(sha256sum "$KERNELS/apply_ssse3.py" | cut -d' ' -f1)" "$(sha256sum "$KERNELS/apply_ssse3_fn.py" | cut -d' ' -f1)" \
-      "$(sha256sum "$KERNELS/apply_tiled_sse.py" | cut -d' ' -f1)"
+      "$(sha256sum "$KERNELS/apply_tiled_sse.py" | cut -d' ' -f1)" "$(sha256sum "$KIT/build/patch_vulkan.py" | cut -d' ' -f1)"
     local dirty=""; [ -n "$(git -C "$KIT" status --porcelain -- . 2>/dev/null)" ] && dirty="-dirty"
     printf '  "kit_commit": "%s%s",\n' "$(git -C "$KIT" rev-parse --short HEAD 2>/dev/null || echo none)" "$dirty"
     printf '  "variants": "%s"\n}\n' "$VARIANTS"

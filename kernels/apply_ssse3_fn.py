@@ -206,7 +206,8 @@ Q4_1 = r"""#elif defined(__SSSE3__)
     *s = sumf;
 """
 
-# llama.cpp has no x86 q2_0 kernel (arch-fallback.h maps the generic one onto the public name).
+# Older llama.cpp has no x86 q2_0 kernel (arch-fallback.h maps the generic one onto the public name);
+# newer has an AVX2-only one, which gets this body as its SSSE3 branch.
 Q2_0_FALLBACK = "#define ggml_vec_dot_q2_0_q8_0_generic ggml_vec_dot_q2_0_q8_0\n"
 Q2_0 = r"""
 // perseus: q2_0 (64 weights per block, codes 0..3 = -1..2 times the scale, 4 per byte with
@@ -317,16 +318,25 @@ def main():
     assert fn.count(Q4_1_ANCHOR) == 1, "q4_1_q8_1 changed upstream"
     src = src[:start] + fn.replace(Q4_1_ANCHOR, Q4_1 + Q4_1_ANCHOR) + src[end:]
 
-    assert "ggml_vec_dot_q2_0_q8_0(" not in src, "llama.cpp now has an x86 q2_0 kernel"
-    open(path, "w").write(src + Q2_0)
-
-    path = os.path.join(cpu, "arch-fallback.h")
-    src = open(path).read()
-    x86 = src.index("#elif defined(__x86_64__) || defined(__i386__)")
-    nxt = src.index("#elif", x86 + 1)
-    block = src[x86:nxt]
-    assert block.count(Q2_0_FALLBACK) == 1, "x86 q2_0 fallback changed upstream"
-    open(path, "w").write(src[:x86] + block.replace(Q2_0_FALLBACK, "") + src[nxt:])
+    if "ggml_vec_dot_q2_0_q8_0(" in src:
+        # llama.cpp since 2026-10 has an x86 q2_0 kernel, AVX2 only: the SSSE3 body goes in as
+        # its #elif, like the kernels above
+        body = Q2_0[Q2_0.index("#if defined(__SSSE3__)\n"):Q2_0.index("#else\n")]
+        start, end = function_span(src, "q2_0_q8_0")
+        fn = src[start:end]
+        assert fn.count("#if defined(__AVX2__)") == 1 and fn.count("\n#else\n") == 1, "q2_0_q8_0 changed upstream"
+        els = fn.index("\n#else\n") + 1
+        src = src[:start] + fn[:els] + body.replace("#if", "#elif", 1) + fn[els:] + src[end:]
+        open(path, "w").write(src)
+    else:
+        open(path, "w").write(src + Q2_0)
+        path = os.path.join(cpu, "arch-fallback.h")
+        src = open(path).read()
+        x86 = src.index("#elif defined(__x86_64__) || defined(__i386__)")
+        nxt = src.index("#elif", x86 + 1)
+        block = src[x86:nxt]
+        assert block.count(Q2_0_FALLBACK) == 1, "x86 q2_0 fallback changed upstream"
+        open(path, "w").write(src[:x86] + block.replace(Q2_0_FALLBACK, "") + src[nxt:])
 
     print(f"added SSSE3 kernels: {', '.join(KERNELS)}, iq4_nl_q8_0, q4_1_q8_1, q2_0_q8_0")
 

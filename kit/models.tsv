@@ -1,5 +1,5 @@
 # Models the kit can carry. Which tests use which model is the plan in run.sh.
-# tier: diag (no models, ~0.4 GB on the USB) < core (~1.4 GB) < full (~77 GB). build-kit.sh copies every row at or below the chosen tier.
+# tier: diag (no models, ~0.4 GB on the USB) < core (~1.4 GB) < full (~102 GB). build-kit.sh copies every row at or below the chosen tier.
 # runner: which llama.cpp build loads it (bin/<runner>/).
 # Flash-Next is two files: llama.cpp opens -00001-of-00002 and finds -00002 (the n-gram table, identical in every ISTA build) beside it.
 #tier	runner	file	size	sha256	url
@@ -7,3 +7,4 @@ core	stock	Qwen3.5-0.8B-Q4_0.gguf	507154688	444406ddd926550c724ec18d5120a9d40ded
 core	stock	Qwen3.5-0.8B-Q4_K_M.gguf	532517120	bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517	https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf
 full	stock	Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf	47039860096	219ea929900dfa9ef091f3aa473fdba6874b65fcb36526d7d851ac9e95856d15	https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/resolve/main/IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf
 full	stock	Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00002-of-00002.gguf	28800138432	316b46f3a2dbd68c900f43136ab9449f9dcc3725dfd8c794847c204bc161e113	https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/resolve/main/IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00002-of-00002.gguf
+full	stock	flint-UD-Q4_K_XL.gguf	25054688704	63c2ecc461ca545134b670c660e76fa20f47240f8d39b6510bfd21c4dd6e072f	https://huggingface.co/unsloth/flint-GGUF/resolve/main/flint-UD-Q4_K_XL.gguf
